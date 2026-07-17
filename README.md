@@ -106,6 +106,3 @@ CXX14FLAGS=-O3 -Wall -mtune=native -march=native
 
 ```
 
-## Author & License
-
-*(Add your name, contact info, and preferred open-source license here)*
