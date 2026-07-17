@@ -1,0 +1,97 @@
+---
+title: "GWAS technical documentation"
+format: html
+editor: visual
+---
+
+## Technical Documentation: Distributed C++/R GWAS Pipeline
+
+### 1. Architectural Overview
+
+This pipeline is designed to perform highly scalable Genome-Wide Association Studies (GWAS) for continuous traits. It bypasses the computational bottleneck of standard mixed-model implementations by utilizing a **P3D (Population Parameters Previously Determined)** or **EMMAX** approximation.
+
+The architecture splits the workload between a **Master Node** (which handles data I/O, null model estimation, and orchestration) and multiple **Worker Nodes** (which process chunks of markers in parallel using highly optimized C++ linear algebra).
+
+#### Core Components
+
+| Component | Language | Description |
+|----|----|----|
+| `mixed_solve.cpp` | C++ (RcppArmadillo) | Solves the base linear mixed model using Golden Section Search to find variance components ($V_u$, $V_e$) and the inverse covariance matrix ($H^{-1}$). |
+| `fastGWAS_chunk.cpp` | C++ (RcppArmadillo) | Takes pre-computed null parameters and applies Generalized Least Squares (GLS) to a subset (chunk) of markers. |
+| `parallel_gwas.R` | R (`future` ecosystem) | The master orchestration script that reads data, splits matrices, dispatches tasks to workers, and aggregates results. |
+
+------------------------------------------------------------------------
+
+### 2. Mathematical Foundation
+
+To achieve parallelization without re-evaluating the costly variance components for millions of markers, the pipeline relies on the P3D approximation.
+
+#### Phase 1: The Null Model
+
+Before testing any markers, the Master Node fits a "Null Model" containing only fixed covariates (usually just an intercept) and the random genetic effect:
+
+$$y = X_{null}\beta + Zu + \epsilon$$
+
+Using Restricted Maximum Likelihood (REML), the solver estimates:
+
+- The genetic variance: $V_u$
+- The residual variance: $V_e$
+- The inverse phenotypic variance matrix: $H^{-1}$
+
+#### Phase 2: Marker Evaluation via GLS
+
+Instead of recalculating $V_u$ and $V_e$ for every marker, the pipeline assumes the addition of a single marker does not significantly alter the background polygenic variance. For a given marker $m$, the Worker Node constructs a new fixed-effect matrix $X_{full} = [X_{null}, m]$ and solves for the marker effect $\hat{\beta}$ using Generalized Least Squares:
+
+$$\hat{\beta} = (X_{full}^T H^{-1} X_{full})^{-1} X_{full}^T H^{-1} y$$
+
+The significance of the marker is evaluated using a standard Wald test:
+
+$$Z = \frac{\hat{\beta}_{marker}}{SE}$$
+
+$$p = 2(1 - \Phi(\vert{}Z\vert{}))$$
+
+------------------------------------------------------------------------
+
+### 3. Step-by-Step Implementation Pipeline
+
+#### Step 1: Data Preparation & Kinship Calculation
+
+The pipeline requires a phenotype vector, a genotype matrix, and a Kinship matrix to control for population structure.
+
+- **Genotype Matrix (**$M$): Must be formatted with individuals as columns and markers as rows prior to chunking. Missing data should be imputed.
+- **Kinship Matrix (**$K$): Typically calculated as a centered Genomic Relationship Matrix (GRM) from the marker data: $K = MM^T / \text{number of markers}$.
+
+#### Step 2: Master Node Initialization & Null Model
+
+The Master Node initializes the computing cluster using the `future` package (e.g., `plan(multisession)` for local cores or `plan(batchtools_slurm)` for HPC).
+
+- It executes `mixed_solve_cpp` exactly once.
+- It extracts $V_u$ and the dense $n \times n$ matrix $H^{-1}$ and holds them in memory.
+
+#### Step 3: Matrix Chunking
+
+To prevent memory overflows and optimize CPU cache usage, the total marker matrix is split into smaller chunks.
+
+- The script calculates indices based on `nrow(geno_matrix)`.
+- Optimal chunk sizes depend on the number of individuals but generally range from **5,000 to 20,000 markers** per chunk.
+
+#### Step 4: Distributed Worker Execution
+
+The Master Node dispatches the chunks asynchronously to the Worker Nodes.
+
+- **Critical Data Transformation:** Before sending data to the C++ worker, the Master Node transposes the chunk ($M_{chunk}^T$) so that individuals are rows and markers are columns. This ensures matrix dimensions align perfectly for Armadillo's matrix multiplication against $H^{-1}$.
+- The Worker Node executes `fastGWASpoly_chunk`, iterating through its assigned columns using block-matrix inversion to compute $\hat{\beta}$ and $p$-values at lightning speed.
+
+#### Step 5: Aggregation and Reporting
+
+As Worker Nodes finish, they return data frames of results to the Master Node.
+
+- The Master Node uses `do.call(rbind, results_list)` to stitch the chunks back into a single, comprehensive summary table.
+- $-\log_{10}(p)$ scores are calculated for downstream visualization (e.g., Manhattan plots).
+
+------------------------------------------------------------------------
+
+### 4. Performance & Scaling Guidelines
+
+- **Memory Management:** The $H^{-1}$ matrix is $n \times n$ (where $n$ is the number of individuals). For 10,000 individuals, this dense matrix requires about 800 MB of RAM. Because `future` creates separate R sessions, each worker will need a copy of $H^{-1}$. Ensure your server has enough total RAM: $\text{Total RAM} \approx \text{Workers} \times \text{Size of } H^{-1}$.
+- **Chunk Sizing:** Do not make chunks too small. The overhead of R dispatching a task to a worker takes a fraction of a second. If a chunk processes in 0.01 seconds, the pipeline spends more time talking to workers than doing actual math. Target chunk sizes that take roughly 5 to 15 seconds to process.

@@ -1,0 +1,146 @@
+---
+title: "Fast Mixed Solver"
+format: html
+editor: visual
+---
+
+## 1. System Prerequisites
+
+Before compiling the C++ code, your system must have the appropriate toolchains installed to compile C++ and link Fortran libraries (which Armadillo relies on for linear algebra).
+
+- **Windows:** Install **Rtools** corresponding to your R version.
+- **macOS (Intel):** Install Xcode Command Line Tools (`xcode-select --install` in terminal) and XQuartz.
+- **macOS (Apple Silicon / M1/M2/M3):** Install Xcode Command Line Tools. **Crucially**, you must also install the official GNU Fortran (`gfortran`) binaries from CRAN (<https://mac.r-project.org/tools/>) to avoid linker errors during compilation.
+- **Linux:** Install `build-essential` and `gfortran` via your package manager (e.g., `sudo apt install build-essential gfortran`).
+
+**Required R Packages:** You will need the following packages installed in R:
+
+``` r
+install.packages(c("Rcpp", "RcppArmadillo"))
+```
+
+------------------------------------------------------------------------
+
+## 2. Compiling the C++ Function in R
+
+There are two primary ways to compile this function: on-the-fly using `sourceCpp()`, or by wrapping it into an R package.
+
+### Method A: On-the-fly Compilation (Recommended for Scripting)
+
+For immediate use in a script, you can compile the `.cpp` file directly into your global environment.
+
+``` r
+library(Rcpp)
+library(RcppArmadillo)
+
+# Compiles the C++ file and binds the mixed_solve_cpp function to R
+Rcpp::sourceCpp("mixed_solve.cpp")
+```
+
+### Method B: Setting Custom Compiling Options (`Makevars`)
+
+For maximum performance, you should instruct the C++ compiler to use high optimization levels (like `-O3`). You can do this by creating a `Makevars` file in your `~/.R/` directory (or `Makevars.win` on Windows).
+
+**Creating a `~/.R/Makevars` file:**
+
+1.  Open R and run: `usethis::edit_r_makevars()`
+2.  Add the following compilation flags to optimize the Armadillo matrix operations:
+
+``` makefile
+CXX11FLAGS=-O3 -Wall -mtune=native -march=native -Wno-ignored-attributes -Wno-deprecated-declarations
+CXX14FLAGS=-O3 -Wall -mtune=native -march=native -Wno-ignored-attributes -Wno-deprecated-declarations
+```
+
+*Note: `-mtune=native` and `-march=native` tell the compiler to optimize specifically for your machine's CPU architecture.*
+
+------------------------------------------------------------------------
+
+## 3. Function Reference
+
+### `mixed_solve_cpp()`
+
+Solves linear mixed models using Restricted Maximum Likelihood (REML) or Maximum Likelihood (ML). This function directly replaces `rrBLUP::mixed.solve` and is highly optimized using C++ Armadillo.
+
+#### Usage
+
+``` r
+mixed_solve_cpp(y, Z_in = NULL, K_in = NULL, X_in = NULL, 
+                method = "REML", bounds = c(1e-09, 1e+09), 
+                SE = FALSE, return_Hinv = FALSE)
+```
+
+#### Arguments
+
+| Argument | Type | Description |
+|----|----|----|
+| **`y`** | Numeric vector | Observations/phenotypes. Missing values (`NA`) are omitted automatically. |
+| **`Z_in`** | Numeric matrix | Design matrix for the random effects ($n \times m$). Defaults to an identity matrix. |
+| **`K_in`** | Numeric matrix | Positive semi-definite covariance/kinship matrix for the random effects ($m \times m$). Defaults to an identity matrix. |
+| **`X_in`** | Numeric matrix | Design matrix for the fixed effects ($n \times p$). Defaults to an intercept-only model (column of 1s). |
+| **`method`** | Character | Estimation method. Must be either `"REML"` (default) or `"ML"`. |
+| **`bounds`** | Numeric vector | Lower and upper bounds for the ridge parameter ($\lambda = V_e / V_u$) used during the Golden Section Search. Default is `c(1e-09, 1e+09)`. |
+| **`SE`** | Logical | If `TRUE`, calculates standard errors for the fixed and random effects. Default is `FALSE`. |
+| **`return_Hinv`** | Logical | If `TRUE`, returns the inverse of the phenotypic variance matrix. Default is `FALSE`. |
+
+#### Value
+
+Returns a named `list` containing the following components:
+
+- **`Vu`**: Estimated variance of the random effects.
+- **`Ve`**: Estimated residual error variance.
+- **`beta`**: Numeric vector of estimated fixed effects (BLUES).
+- **`u`**: Numeric vector of estimated random effects (BLUPS).
+- **`LL`**: Maximized log-likelihood (or restricted log-likelihood for REML).
+- **`beta.SE`**: (Optional) Standard errors for the fixed effects. Returned if `SE = TRUE`.
+- **`u.SE`**: (Optional) Standard errors for the random effects. Returned if `SE = TRUE`.
+- **`Hinv`**: (Optional) The inverse of the phenotypic variance matrix. Returned if `return_Hinv = TRUE`.
+
+------------------------------------------------------------------------
+
+## 4. End-to-End Example
+
+This example demonstrates how to compile the function, generate synthetic genomic data, and extract the predicted breeding values.
+
+``` r
+# 1. Load Required Libraries
+library(Rcpp)
+library(RcppArmadillo)
+
+# 2. Compile the Function
+# Assuming 'mixed_solve.cpp' is saved in your current working directory
+Rcpp::sourceCpp("mixed_solve.cpp")
+
+# 3. Generate Synthetic Data
+set.seed(123)
+N_lines <- 200
+N_markers <- 1000
+
+# Random population of lines with markers (-1 or 1)
+M <- matrix(ifelse(runif(N_lines * N_markers) < 0.5, -1, 1), N_lines, N_markers)
+
+# True marker effects
+u_true <- rnorm(N_markers)
+g <- as.vector(crossprod(t(M), u_true))
+
+# Generate phenotypes with a heritability of 0.5
+h2 <- 0.5  
+y <- g + rnorm(N_lines, mean = 0, sd = sqrt((1 - h2) / h2 * var(g)))
+
+# 4. Predict Marker Effects (Default K = Identity Matrix)
+cat("Running Marker Effect Prediction...\n")
+ans_markers <- mixed_solve_cpp(y, Z_in = M)
+
+cat("Estimated Vu:", ans_markers$Vu, "\n")
+cat("Estimated Ve:", ans_markers$Ve, "\n")
+cat("Accuracy (Correlation):", cor(u_true, as.vector(ans_markers$u)), "\n\n")
+
+# 5. Predict Breeding Values using a Kinship Matrix
+# Simple Genomic Relationship Matrix (GRM) for demonstration
+K_mat <- tcrossprod(M) / ncol(M) 
+
+cat("Running Breeding Value Prediction with K matrix...\n")
+ans_breeding <- mixed_solve_cpp(y, K_in = K_mat)
+
+cat("Estimated Vu:", ans_breeding$Vu, "\n")
+cat("Accuracy (Correlation):", cor(g, as.vector(ans_breeding$u)), "\n")
+```
