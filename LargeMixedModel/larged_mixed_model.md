@@ -1,171 +1,113 @@
-# Methodological Details: Large-Scale Mixed Model / Genomic Prediction Approximations
+# Unified Multi-Engine Mixed-Effects and Animal Model Architecture
 
-This documentation outlines the mathematical framework, C++ functions, and R implementation for bypassing the memory and computational bottlenecks of massive Mixed Model Equations (MME) in genomic evaluations.
-
-Two primary bottlenecks are addressed:
-
-1. **Computational Time ($O(N^3)$):** Variance component (VC) estimation requires repeatedly inverting dense relationship matrices.
-2. **Memory Allocation ($O(N^2)$):** Constructing the dense genomic relationship matrix ($G$) exceeds standard RAM limits as the number of individuals ($N$) grows large.
+## Methodological Documentation & Implementation Guide
 
 ---
 
-## 1. Two-Step Variance Component Approximation
+## 1. Executive Summary & Architecture Overview
 
-Traditional Genomic Best Linear Unbiased Prediction (GBLUP) solves the following system to estimate genetic variance ($\sigma^2_g$) and residual variance ($\sigma^2_e$):
+Fitting linear mixed-effects models (LMMs) and quantitative genetic animal models across different statistical paradigms (**Frequentist** vs. **Bayesian**) and software ecosystems (`lme4`, `sommer`, `MCMCglmm`, `BGLR`, etc.) typically requires writing distinct, engine-specific syntax, managing alternative matrix structures (e.g., covariance matrices $A$ vs. inverse matrices $A^{-1}$), and parsing heterogeneous output objects.
 
-$$\begin{bmatrix} X'X & X'Z \\ Z'X & Z'Z + G^{-1}\lambda \end{bmatrix} \begin{bmatrix} \hat{\beta} \\ \hat{u} \end{bmatrix} = \begin{bmatrix} X'y \\ Z'y \end{bmatrix}$$
+The **Unified Multi-Engine Mixed-Effects Architecture** solves this interoperability challenge by introducing a two-tier abstraction wrapper:
 
-Where $\lambda = \sigma^2_e / \sigma^2_g$. Inverting $G$ iteratively during Restricted Maximum Likelihood (REML) is computationally infeasible for $N > 50,000$.
+1. **`MasterMixedSolver`**: A smart routing and execution engine that automates input diagnostics, paradigm mapping, and matrix transformation (such as sparse-to-dense conversion and automated matrix inversion).
+2. **`ExtractMixedInfo`**: A universal standardization parser that homogenizes engine-specific output objects into a unified schema for fixed effects, variance components, and individual-level random effects (BLUPs / Estimated Breeding Values [EBVs]).
 
-### Methodology
+---
 
-Instead of estimating VC on the full dataset, we implement a two-step approximation:
+## 2. Core Module 1: `MasterMixedSolver`
 
-1. **Subset Estimation:** Select a representative subset of individuals ($n \approx 5,000$) to estimate a highly accurate $\lambda$.
-2. **Conjugate Gradient Solver:** Fix $\lambda$ and solve the full system iteratively. The exact GBLUP solution can be re-written without $G^{-1}$ as a linear system $Ax = b$, where $A = (G + \lambda I)$ and $b = y$. We solve for $x$ using a Conjugate Gradient (CG) solver, which relies purely on matrix-vector multiplications ($O(N^2)$). Final estimated breeding values (EBVs) are obtained via $\hat{g} = G x$.
+The solver acts as a dispatch router that analyzes the model formula, dataset characteristics, and user preferences to execute the appropriate backend solver.
 
-### Core Function: C++ Conjugate Gradient
-
-```cpp
-// [[Rcpp::depends(RcppArmadillo)]]
-#include <RcppArmadillo.h>
-
-// [[Rcpp::export]]
-arma::vec cg_solve(const arma::mat& A, const arma::vec& b, int max_iter = 1000, double tol = 1e-6) {
-    int n = A.n_rows;
-    arma::vec x = arma::zeros(n);
-    arma::vec r = b - A * x;
-    arma::vec p = r;
-    double rsold = arma::dot(r, r);
-    
-    for (int i = 0; i < max_iter; ++i) {
-        arma::vec Ap = A * p;
-        double alpha = rsold / arma::dot(p, Ap);
-        x = x + alpha * p;
-        r = r - alpha * Ap;
-        double rsnew = arma::dot(r, r);
-        
-        if (sqrt(rsnew) < tol) break;
-        
-        p = r + (rsnew / rsold) * p;
-        rsold = rsnew;
-    }
-    return x;
-}
-
-```
-
-### Embedded Example: Subset VC + CG Pipeline
+### Function Signature & Parameters
 
 ```R
-library(rrBLUP)
-library(Rcpp)
-# Note: Ensure cg_solve is sourced via Rcpp::sourceCpp()
-
-# 1. Simulate full dataset
-N <- 10000; M <- 2000
-Z <- matrix(sample(c(-1, 0, 1), N * M, replace = TRUE), N, M)
-G <- tcrossprod(Z) / M 
-y_c <- scale(Z %*% rnorm(M, 0, 1) + rnorm(N, 0, 1), scale = FALSE)
-
-# 2. Estimate lambda on a subset (N = 500)
-idx_sub <- sample(1:N, 500)
-fit_sub <- mixed.solve(y_c[idx_sub], K = G[idx_sub, idx_sub])
-lambda_est <- fit_sub$Ve / fit_sub$Vu
-
-# 3. Solve full system using C++ CG solver
-A <- G + (lambda_est * diag(N))
-x_alpha <- cg_solve(A, as.numeric(y_c))
-
-# 4. Compute Final EBVs
-ebv_approx <- G %*% x_alpha
+MasterMixedSolver <- function(formula, data, paradigm = "Frequentist", engine = "auto", K_matrix = NULL, K_is_inverse = FALSE, nIter = 2000, burnIn = 500)
 
 ```
 
----
+* **`formula`**: Standard R formula using lme4 syntax (e.g., `Reaction ~ Days + (1 | Subject)` or `tarsus ~ sex + (1 | animal)`).
+* **`data`**: A data frame containing the phenotypic and grouping variables.
+* **`paradigm`**: Character string specifying `"Frequentist"` or `"Bayesian"`.
+* **`engine`**: Target computational backend (`"auto"`, `"lme4"`, `"blme"`, `"mbest"`, `"brms"`, `"sommer"`, `"MCMCglmm"`, `"BGLR"`, `"rrBLUP"`).
+* **`K_matrix`**: Optional relationship matrix (Kinship or Pedigree Relationship Matrix $A$).
+* **`K_is_inverse`**: Logical flag indicating whether `K_matrix` is supplied as an inverse ($A^{-1}$) or covariance ($A$) matrix.
+* **`nIter` / `burnIn**`: MCMC chain parameters for Bayesian engines.
 
-## 2. Memory-Efficient $G$ Matrix Construction
+### Routing Logic & Automation Rules
 
-For a genotype matrix $Z$ of dimensions $N \times M$, the standard R calculation `tcrossprod(Z)` creates a massive intermediate object before returning the $N \times N$ matrix. At $N=100,000$, this requires approximately 80 GB of contiguous RAM.
-
-### Methodology
-
-To bypass memory limits without altering the mathematical output, the $G$ matrix is computed using a **Block Matrix (Chunking) Algorithm**. The algorithm divides the $N$ individuals into sequential blocks. It iteratively computes the cross-products of these blocks, filling in a pre-allocated output matrix. This restricts the maximum contiguous memory allocation to the size of the block ($b \times b$) rather than $N \times N$.
-
-### Core Function: C++ Block Builder
-
-```cpp
-// [[Rcpp::depends(RcppArmadillo)]]
-#include <RcppArmadillo.h>
-
-// [[Rcpp::export]]
-void compute_G_blocked(const arma::mat& Z, arma::mat& G, int block_size) {
-    int N = Z.n_rows;
-    double M = Z.n_cols;
-    
-    for (int i = 0; i < N; i += block_size) {
-        int end_i = std::min(i + block_size - 1, N - 1);
-        arma::mat Z_block_i = Z.rows(i, end_i);
-        
-        // Diagonal block
-        G.submat(i, i, end_i, end_i) = (Z_block_i * Z_block_i.t()) / M;
-        
-        // Off-diagonal blocks (filling symmetrically)
-        for (int j = i + block_size; j < N; j += block_size) {
-            int end_j = std::min(j + block_size - 1, N - 1);
-            arma::mat Z_block_j = Z.rows(j, end_j);
-            arma::mat G_sub = (Z_block_i * Z_block_j.t()) / M;
-            
-            G.submat(i, j, end_i, end_j) = G_sub;
-            G.submat(j, i, end_j, end_i) = G_sub.t();
-        }
-        Rcpp::checkUserInterrupt(); 
-    }
-}
-
-```
-
-### Embedded Example: Chunked Generation
-
-```R
-# Note: Ensure compute_G_blocked is sourced via Rcpp::sourceCpp()
-
-N <- 20000
-M <- 5000
-Z <- matrix(sample(c(-1, 0, 1), N * M, replace = TRUE), N, M)
-
-# Pre-allocate the output matrix to avoid R-level copying
-G_chunked <- matrix(0, nrow = N, ncol = N)
-
-# Compute G in blocks of 2000 individuals
-compute_G_blocked(Z, G_chunked, block_size = 2000)
-
-```
-
----
-
-## 3. Alternative Dimensionality Reduction: SNP-BLUP Equivalence
-
-If $N > M$ (more individuals than markers), constructing $G$ is mathematically redundant. The Woodbury matrix identity demonstrates that solving the model in the marker space (SNP-BLUP) is strictly equivalent to solving in the individual space (GBLUP).
-
-### Methodology
-
-Instead of calculating $Z Z'$ ($N \times N$), compute the marker cross-product $Z' Z$ ($M \times M$).
-
-1. Calculate marker effects ($\hat{m}$):
-
-$$(Z'Z + I\lambda) \hat{m} = Z'y$$
-
-
-2. Project breeding values ($\hat{g}$):
-
-$$\hat{g} = Z \hat{m}$$
-
-
-
-**Complexity Comparison:**
-
-| Method | Target Matrix | Dimension | Primary Use Case |
+| Condition / Input | Default Auto-Selected Engine | Paradigm | Key Implementation Detail |
 | --- | --- | --- | --- |
-| **GBLUP (Chunked)** | $Z Z'$ | $N \times N$ | $M \gg N$, or utilizing APY inverse |
-| **SNP-BLUP** | $Z' Z$ | $M \times M$ | $N \gg M$ |
+| **No Kinship Matrix** | `lme4` | Frequentist | Standard REML estimation via `lmer()`. |
+| **No Kinship Matrix** | `blme` | Bayesian | Maximum A Posteriori (MAP) estimation with default priors. |
+| **Kinship Matrix Provided** | `sommer` | Frequentist | AI-REML estimation via `mmer()`, mapping `Gu` structure. |
+| **Kinship Matrix Provided** | `BGLR` | Bayesian | Reproducing Kernel Hilbert Spaces (RKHS) Gibbs sampling. |
+
+### Automated Matrix Inversion Layer
+
+Different engines expect different matrix parameterizations for random genetic effects:
+
+* **`MCMCglmm`**: Strictly requires the inverse pedigree relationship matrix ($A^{-1}$). If a covariance matrix is supplied, the solver automatically computes `Matrix::solve(K_matrix)`.
+* **`sommer` & `BGLR**`: Require the raw covariance matrix ($A$). If an inverse matrix is supplied, the solver automatically un-inverts it and ensures dense matrix compliance with retained row/column names.
+
+---
+
+## 3. Core Module 2: `ExtractMixedInfo`
+
+Because every R package returns model coefficients, variance components, and random effects in unique data structures (e.g., `lme4` returns 3D lists/S4 classes, `sommer` returns nested data frames, `MCMCglmm` returns MCMC chain matrices), `ExtractMixedInfo` acts as a universal adapter.
+
+### Standardized Output Schema
+
+Every fitted model object, regardless of the underlying engine, is coerced into a standardized R list format:
+
+* **`Engine`**: Character tag identifying the source package.
+* **`FixedEffects`**: Named numeric vector of population-level fixed coefficients.
+* **`RandomEffects`**: Standardized data frame containing two explicit columns:
+* `ID`: Character vector of group levels (e.g., Subject IDs or Animal pedigree IDs).
+* `Value`: Numeric vector of conditional modes, BLUPs, or EBVs.
+
+
+* **`VarianceComponents`**: Named list of extracted variance parameters (group variance and residual variance).
+
+---
+
+## 4. Backend Engine Support Matrix
+
+| Engine | Paradigm | Primary Function | Kinship / Pedigree Support | Output Standardization Target |
+| --- | --- | --- | --- | --- |
+| **`lme4`** | Frequentist | `lme4::lmer()` | No | `lmerMod` S4 class |
+| **`blme`** | Bayesian (MAP) | `blme::blmer()` | No | `bmerMod` S4 class |
+| **`mbest`** | Frequentist | `mbest::mhglm()` | No | `mhglm` object |
+| **`brms`** | Bayesian (HMC) | `brms::brm()` | No | `brmsfit` S4 class |
+| **`sommer`** | Frequentist | `sommer::mmer()` | Yes (via `Gu`) | `mmer` S3 list |
+| **`MCMCglmm`** | Bayesian (MCMC) | `MCMCglmm::MCMCglmm()` | Yes (via `ginverse`) | `MCMCglmm` S3 object |
+| **`BGLR`** | Bayesian (Gibbs) | `BGLR::BGLR()` | Yes (via RKHS `ETA`) | `BGLR` list object |
+| **`rrBLUP`** | Frequentist | `rrBLUP::mixed.solve()` | Yes (via `K`) | List object with `Vu` / `Ve` |
+
+---
+
+## 5. Implementation Workflow & Execution Blueprint
+
+The architecture divides execution workflows into distinct operational tiers:
+
+```
+[ Raw Data & Pedigree ] 
+        │
+        ▼
+[ MasterMixedSolver ] ──(Auto-Routing & Matrix Inversion)
+        │
+        ▼
+[ Backend Engine Execution ] (lme4, sommer, MCMCglmm, BGLR, etc.)
+        │
+        ▼
+[ ExtractMixedInfo ] ──(Standardization to ID + Value Schema)
+        │
+        ▼
+[ Comparative Analytics ] (Fixed Effects, Variance Components, EBV Merging)
+
+```
+
+1. **Environment Initialization**: Load all target mixed-model libraries simultaneously.
+2. **Model Dispatch**: Pass formulas and data into `MasterMixedSolver()`.
+3. **Information Extraction**: Feed fitted objects into `ExtractMixedInfo()` to sanitize names, strip prefixes (e.g., converting sommer's `animal.Fem2` to clean identifiers like `Fem2`), and extract posterior means or BLUPs.
+4. **Comparative Analysis**: Combine results across engines using standard data frame merging (`merge(..., by = "ID", all = TRUE)`) to evaluate parameter convergence across software implementations.
