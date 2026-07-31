@@ -1,0 +1,79 @@
+---
+title: "Function details"
+format: html
+editor: visual
+---
+
+## Part 1: C++ Worker Implementation (`fastGWAS_chunk.cpp`)
+
+### Overview
+
+The `fastGWASpoly_chunk` function is an RcppArmadillo-based routine designed to execute the heavy linear algebra required for testing a subset (chunk) of genetic markers. It relies on the P3D (Population Parameters Previously Determined) approximation, meaning it takes pre-computed variance parameters from the master node to avoid recalculating the spectral decomposition for every marker.
+
+### Input Parameters
+
+| Parameter | C++ Type | Description |
+|------------------------|------------------------|------------------------|
+| **`y`** | `arma::vec` | An $n \times 1$ vector of continuous phenotypes. |
+| **`X_null`** | `arma::mat` | An $n \times p$ design matrix of fixed effects from the null model (typically just a single column of 1s for the intercept). |
+| **`Hinv`** | `arma::mat` | An $n \times n$ dense inverse phenotypic variance matrix pre-computed by the master node. |
+| **`Vu`** | `double` | The pre-computed genetic/polygenic variance scalar. |
+| **`M_chunk`** | `arma::mat` | An $n \times m$ matrix representing the chunk of marker dosages to test. Individuals must be rows, and markers must be columns. |
+
+### Mathematical and Algorithmic Workflow
+
+**1. Constant Precomputation** To minimize operations inside the marker loop, the function calculates constant terms associated with the null model once per chunk:
+
+- `Hinv_Xnull`: $H^{-1}X_{null}$
+- `Xnull_Hinv_Xnull`: $X_{null}^T H^{-1} X_{null}$
+- `Hinv_y`: $H^{-1}y$
+- `Xnull_Hinv_y`: $X_{null}^T H^{-1} y$
+
+**2. The Marker Loop** For each column vector $m$ in `M_chunk` (representing a single marker's genotypes), the function builds the full Generalized Least Squares (GLS) matrices. Instead of concatenating $[X_{null}, m]$ in memory for every iteration, it uses block matrix substitution to construct the $W$ matrix efficiently.
+
+$$W = X_{full}^T H^{-1} X_{full} = \begin{bmatrix} X_{null}^T H^{-1} X_{null} & X_{null}^T H^{-1} m \\ m^T H^{-1} X_{null} & m^T H^{-1} m \end{bmatrix}$$
+
+**3. Inversion and Solving** The function uses Armadillo's pseudo-inverse (`pinv`) to invert $W$. Pseudo-inverse is strictly used here as a failsafe against monomorphic or highly collinear markers that would otherwise throw a singular matrix error and crash the entire worker node.
+
+The marker effect $\hat{\beta}$ is solved via:
+
+$$\hat{\beta} = W^{-1} (X_{full}^T H^{-1} y)$$
+
+**4. Significance Testing** The variance of the marker effect is extracted from the bottom-right diagonal element of $W^{-1}$, multiplied by $V_u$. A standard Wald test $Z$-score is computed to derive the two-tailed $p$-value.
+
+### Outputs
+
+Returns an R `List` containing three numeric vectors of length $m$:
+
+- `beta`: The estimated allele substitution effect for each marker.
+- `SE`: The standard error of the estimate.
+- `p_value`: The two-tailed $p$-value based on the standard normal distribution.
+
+------------------------------------------------------------------------
+
+## Part 2: R Orchestration Script (`fastGWAS_parallel.R`)
+
+### Overview
+
+This script acts as the master controller. It calculates the null model, manages memory, partitions the genotype matrix, dispatches the C++ tasks to available computing cores, and stitches the results back together. It leverages the `future` ecosystem for backend-agnostic parallelization.
+
+### Core Implementation Steps
+
+**1. Parallel Backend Initialization** The script uses `future::plan()` to define the execution environment.
+
+- `plan(multisession, workers = N)` spins up independent R sessions locally.
+- The architecture inherently supports scaling to HPC clusters using `plan(batchtools_slurm)` without altering the downstream logic.
+
+**2. Null Model Evaluation** The script calls `mixed_solve_cpp` exactly once, passing an intercept-only `X_null` matrix and the Kinship matrix `K_mat`. This step is the primary computational bottleneck of the entire pipeline (scaling at $O(n^3)$ relative to the number of individuals). Extracting `Hinv` and `Vu` here is what enables the high-speed chunking later.
+
+**3. Matrix Partitioning (Chunking)** The full genotype matrix (`geno_matrix`) is subset into smaller batches.
+
+- Indices are generated using `split()` and `ceiling()`.
+- The chunk size determines memory overhead. A chunk size of 5,000 to 20,000 markers optimizes the trade-off between R's dispatch overhead and C++'s memory allocation limits.
+
+**4. Asynchronous Dispatch (`future_lapply`)** This loop iterates over the chunk indices. Crucially, inside the worker environment, the script executes a transposition:
+
+- `M_chunk <- t(geno_matrix[idx, , drop = FALSE])`
+- This ensures the resulting chunk passed to `fastGWASpoly_chunk` correctly maps to dimensions matching the individuals ($n$), which is strictly required for multiplication against the $n \times n$ `Hinv` matrix.
+
+**5. Result Reassembly** Each worker returns a small `data.frame`. The master node uses `do.call(rbind, results_list)` to efficiently vertically concatenate these frames into the final, complete GWAS summary statistics table. $-\log_{10}(p)$ values are appended for direct use in downstream Manhattan plot visualizations.

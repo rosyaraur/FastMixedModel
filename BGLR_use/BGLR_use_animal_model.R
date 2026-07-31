@@ -10,7 +10,7 @@ library(MCMCglmm)
 # ==========================================
 # We use the built-in 'mice' dataset from BGLR for a realistic relationship matrix
 data(mice, package = "BGLR")
-y <- mice.pheno$Obese.BMI
+y <- mice.pheno$Obesity.BMI
 A <- mice.A # Numerator Relationship Matrix (or Genomic Relationship Matrix)
 
 # MCMCglmm and sommer prefer data frames
@@ -62,23 +62,34 @@ h2_sommer <- var_g_sommer / (var_g_sommer + var_e_sommer)
 # 4. MCMCglmm (Bayesian - MCMC)
 # ==========================================
 # Define priors for variance components (V = 1, nu = 0.002 is a standard uninformative prior)
+library(Matrix) # Required for sparse matrices
+
+# 1. Setup the prior
 prior_mcmc <- list(G = list(G1 = list(V = 1, nu = 0.002)), 
                    R = list(V = 1, nu = 0.002))
 
-# Fit model (ginverse maps the inverse relationship matrix to the 'id' random effect)
+# 2. Invert and convert the A matrix to sparse format
+A_inv_base <- solve(A)
+A_inv_sparse <- as(A_inv_base, "dgCMatrix")
+rownames(A_inv_sparse) <- rownames(A)
+colnames(A_inv_sparse) <- colnames(A)
+
+# 3. Fit the model using the SPARSE matrix
 fit_mcmc <- MCMCglmm(fixed = y ~ 1, 
                      random = ~ id, 
-                     ginverse = list(id = A_inv),
+                     ginverse = list(id = A_inv_sparse), # <--- This is the crucial change
                      data = pheno_df, 
                      prior = prior_mcmc, 
                      nitt = 5000, 
                      burnin = 1000, 
                      verbose = FALSE)
 
-# Extract Heritability (using the posterior means of the variance components)
+# 4. Extract Heritability
 var_g_mcmc <- mean(fit_mcmc$VCV[, "id"])
 var_e_mcmc <- mean(fit_mcmc$VCV[, "units"])
 h2_mcmc <- var_g_mcmc / (var_g_mcmc + var_e_mcmc)
+
+print(paste("Heritability (MCMCglmm):", round(h2_mcmc, 3)))
 
 
 # ==========================================
