@@ -235,81 +235,15 @@ An in-depth comparative review of the **ten computational methods (Paths A throu
 | Engine / Path | Origin / Software Lineage | Core Mathematical Strategy | Primary Computational Bottleneck | Scalability / Speed ($N=1500$) |
 | --- | --- | --- | --- | --- |
 | **A (`kernel_bglr`)** | Genomic Selection / BGLR | Spectral Rotation + Scalar Gibbs | Iterative MCMC sweeps ($O(n \cdot q)$) | Moderate ($2.08$s) |
-| **B (`block_mcmcglmm`)** | Animal Models / MCMCglmm
-
- | Sparse MME Block Gibbs Cholesky
-
- | Sparse Cholesky per iteration ($O(q^3)$)
-
- | Moderate ($2.95$s)
-
- |
-| **C (`penalized_map_blme`)** | Empirical Bayes / blme
-
- | Penalized MAP via profiled deviance
-
- | Numerical optimization evaluations
-
- | Ultra-fast ($0.06$s)
-
- |
-| **D (`hmc_stan`)** | Probabilistic Programming / brms
-
- | Gradient-based HMC / NUTS
-
- | AutoDiff gradient calculations
-
- | Instantaneous mock ($0.00$s)
-
- |
-| **E (`reml_lme4`)** | General Statistics / lme4
-
- | Profiled REML via Sparse Cholesky
-
- | Iterative optimization over $\lambda$<br> | Ultra-fast ($0.06$s)
-
- |
-| **F (`moment_mbest`)** | ANOVA / Method of Moments
-
- | Analytical sample moment matching
-
- | Matrix inversions for OLS / residuals
-
- | Ultra-fast ($0.02$s)
-
- |
-| **G (`spectral_rrblup`)** | Genomic Prediction / rrBLUP
-
- | Upfront Eigen-decomposition + 1D search
-
- | Initial $O(N^3)$ decomposition
-
- | Ultra-fast ($0.02$s)
-
- |
-| **H (`ai_sommer`)** | Quantitative Genetics / sommer
-
- | Dense Average Information REML
-
- | Dense $N \times N$ matrix inversions ($O(N^3)$)
-
- | Slow ($25.46$s)
-
- |
-| **I (`sparse_asreml`)** | Animal Breeding / ASReml
-
- | Sparse MME + Takahashi Subset Inversion
-
- | Sparse Cholesky updates | Ultra-fast ($0.08$s)
-
- |
-| **J (`nr_sas`)** | Enterprise / SAS PROC MIXED
-
- | Marginal $V$ form + Exact Newton-Raphson
-
- | Exact Hessian trace evaluations ($O(N^2)$ to $O(N^3)$)
-
- | Moderate ($2.29$s)
+| **B (`block_mcmcglmm`)** | Animal Models / MCMCglmm | Sparse MME Block Gibbs Cholesky | Sparse Cholesky per iteration ($O(q^3)$) | Moderate ($2.95$s)|
+| **C (`penalized_map_blme`)** | Empirical Bayes / blme | Penalized MAP via profiled deviance | Numerical optimization evaluations | Ultra-fast ($0.06$s) |
+| **D (`hmc_stan`)** | Probabilistic Programming / brms | Gradient-based HMC / NUTS | AutoDiff gradient calculations | Instantaneous mock ($0.00$s) |
+| **E (`reml_lme4`)** | General Statistics / lme4 | Profiled REML via Sparse Cholesky | Iterative optimization over $\lambda$<br> | Ultra-fast ($0.06$s) |
+| **F (`moment_mbest`)** | ANOVA / Method of Moments | Analytical sample moment matching | Matrix inversions for OLS / residuals | Ultra-fast ($0.02$s) |
+| **G (`spectral_rrblup`)** | Genomic Prediction / rrBLUP | Upfront Eigen-decomposition + 1D search | Initial $O(N^3)$ decomposition | Ultra-fast ($0.02$s) |
+| **H (`ai_sommer`)** | Quantitative Genetics / sommer | Dense Average Information REML | Dense $N \times N$ matrix inversions ($O(N^3)$) | Slow ($25.46$s) |
+| **I (`sparse_asreml`)** | Animal Breeding / ASReml | Sparse MME + Takahashi Subset Inversion | Sparse Cholesky updates | Ultra-fast ($0.08$s) |
+| **J (`nr_sas`)** | Enterprise / SAS PROC MIXED | Marginal $V$ form + Exact Newton-Raphson | Exact Hessian trace evaluations ($O(N^2)$ to $O(N^3)$) | Moderate ($2.29$s)
 
  |
 ## Evolutionary Genealogy Tree of the Ten Mixed Model Methods
