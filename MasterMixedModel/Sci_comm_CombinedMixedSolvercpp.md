@@ -234,15 +234,7 @@ An in-depth comparative review of the **ten computational methods (Paths A throu
 
 | Engine / Path | Origin / Software Lineage | Core Mathematical Strategy | Primary Computational Bottleneck | Scalability / Speed ($N=1500$) |
 | --- | --- | --- | --- | --- |
-| **A (`kernel_bglr`)** | Genomic Selection / BGLR
-
- | Spectral Rotation + Scalar Gibbs
-
- | Iterative MCMC sweeps ($O(n \cdot q)$)
-
- | Moderate ($2.08$s)
-
- |
+| **A (`kernel_bglr`)** | Genomic Selection / BGLR | Spectral Rotation + Scalar Gibbs | Iterative MCMC sweeps ($O(n \cdot q)$) | Moderate ($2.08$s) |
 | **B (`block_mcmcglmm`)** | Animal Models / MCMCglmm
 
  | Sparse MME Block Gibbs Cholesky
@@ -501,7 +493,7 @@ The architecture was evaluated on a simulated dataset scaling to $N = 1500$ obse
 ### Table 1: Performance and Parameter Recovery Benchmark ($N = 1500$)
 
 | Engine | Estimated $\text{varE}$ | Estimated $\text{varU}$ | Execution Time (Seconds) |
-| --- | --- | --- | --- |
+| --- 	 | ---                     | ---                     | ---                      |
 | **`kernel_bglr`** | 2.5640 | 15.1817 | 2.0768|
 | **`block_mcmcglmm`** | 1.9864 | 2.7803 | 2.9531|
 | **`penalized_map_blme`** | 1.7257 | 2.7121 | 0.0617|
