@@ -243,9 +243,8 @@ An in-depth comparative review of the **ten computational methods (Paths A throu
 | **G (`spectral_rrblup`)** | Genomic Prediction / rrBLUP | Upfront Eigen-decomposition + 1D search | Initial $O(N^3)$ decomposition | Ultra-fast ($0.02$s) |
 | **H (`ai_sommer`)** | Quantitative Genetics / sommer | Dense Average Information REML | Dense $N \times N$ matrix inversions ($O(N^3)$) | Slow ($25.46$s) |
 | **I (`sparse_asreml`)** | Animal Breeding / ASReml | Sparse MME + Takahashi Subset Inversion | Sparse Cholesky updates | Ultra-fast ($0.08$s) |
-| **J (`nr_sas`)** | Enterprise / SAS PROC MIXED | Marginal $V$ form + Exact Newton-Raphson | Exact Hessian trace evaluations ($O(N^2)$ to $O(N^3)$) | Moderate ($2.29$s)
+| **J (`nr_sas`)** | Enterprise / SAS PROC MIXED | Marginal $V$ form + Exact Newton-Raphson | Exact Hessian trace evaluations ($O(N^2)$ to $O(N^3)$) | Moderate ($2.29$s) |
 
- |
 ## Evolutionary Genealogy Tree of the Ten Mixed Model Methods
 
 ```text
@@ -254,28 +253,27 @@ An in-depth comparative review of the **ten computational methods (Paths A throu
  ├──► BRANCH 1: FREQUENTIST PARADIGM (Likelihood Optimization & Analytical Moments)
  │     │
  │     ├──► Sub-branch 1.1: Sparse Hierarchical & Enterprise Optimization
- │     │     ├──► Path E: reml_lme4 (lme4 Essence)[cite: 3]
- │     │     ├──► Path I: sparse_asreml (ASReml Essence)[cite: 3]
- │     │     └──► Path J: nr_sas (SAS PROC MIXED Essence)[cite: 3]
+ │     │     ├──► Path E: reml_lme4 (lme4 Essence)
+ │     │     ├──► Path I: sparse_asreml (ASReml Essence)
+ │     │     └──► Path J: nr_sas (SAS PROC MIXED Essence)
  │     │
  │     ├──► Sub-branch 1.2: Dense Quantitative Genetics & Spectral Reduction
- │     │     ├──► Path G: spectral_rrblup (rrBLUP Essence)[cite: 3]
- │     │     └──► Path H: ai_sommer (sommer Essence)[cite: 3]
+ │     │     ├──► Path G: spectral_rrblup (rrBLUP Essence)
+ │     │     └──► Path H: ai_sommer (sommer Essence)
  │     │
  │     └──► Sub-branch 1.3: Non-Iterative Moment Matching
- │           └──► Path F: moment_mbest (mbest Essence)[cite: 3]
+ │           └──► Path F: moment_mbest (mbest Essence)
  │
  └──► BRANCH 2: BAYESIAN & PENALIZED PARADIGM (Posterior Exploration & Regularization)
        │
        ├──► Sub-branch 2.1: Deterministic Penalized MAP (Empirical Bayes)
-       │     └──► Path C: penalized_map_blme (blme Essence)[cite: 3]
-       │
+       │     └──► Path C: penalized_map_blme (blme Essence)
        ├──► Sub-branch 2.2: Stochastic Gibbs Sampling (Random Walk)
-       │     ├──► Path A: kernel_bglr (BGLR Essence)[cite: 3]
-       │     └──► Path B: block_mcmcglmm (MCMCglmm Essence)[cite: 3, 4]
+       │     ├──► Path A: kernel_bglr (BGLR Essence)
+       │     └──► Path B: block_mcmcglmm (MCMCglmm Essence)
        │
        └──► Sub-branch 2.3: Gradient-Based Hamiltonian Monte Carlo
-             └──► Path D: hmc_stan (brms / Stan Essence)[cite: 3]
+             └──► Path D: hmc_stan (brms / Stan Essence)
 
 ```
 
