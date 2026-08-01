@@ -502,76 +502,16 @@ The architecture was evaluated on a simulated dataset scaling to $N = 1500$ obse
 
 | Engine | Estimated $\text{varE}$ | Estimated $\text{varU}$ | Execution Time (Seconds) |
 | --- | --- | --- | --- |
-| **`kernel_bglr`** | 2.5640
-
- | 15.1817
-
- | 2.0768
-
- |
-| **`block_mcmcglmm`** | 1.9864
-
- | 2.7803
-
- | 2.9531
-
- |
-| **`penalized_map_blme`** | 1.7257
-
- | 2.7121
-
- | 0.0617
-
- |
-| **`hmc_stan`** | 1.1245
-
- | 1.0000
-
- | 0.0008
-
- |
-| **`reml_lme4`** | 1.8603
-
- | 0.5065
-
- | 0.0628
-
- |
-| **`moment_mbest`** | 1.7565
-
- | 0.0000
-
- | 0.0150
-
- |
-| **`spectral_rrblup`** | 1.7305
-
- | 2.4486
-
- | 0.0221
-
- |
-| **`ai_sommer`** | 1.0342
-
- | 1.5159
-
- | 25.4635
-
- |
-| **`sparse_asreml`** | 2.0558
-
- | 2.8142
-
- | 0.0785
-
- |
-| **`nr_sas`** | 1.9885
-
- | 2.8136
-
- | 2.2895
-
- |
+| **`kernel_bglr`** | 2.5640 | 15.1817 | 2.0768|
+| **`block_mcmcglmm`** | 1.9864 | 2.7803 | 2.9531|
+| **`penalized_map_blme`** | 1.7257 | 2.7121 | 0.0617|
+| **`hmc_stan`** | 1.1245 | 1.0000 | 0.0008 |
+| **`reml_lme4`** | 1.8603 | 0.5065 | 0.0628 |
+| **`moment_mbest`** | 1.7565 | 0.0000 | 0.0150 |
+| **`spectral_rrblup`** | 1.7305 | 2.4486 | 0.0221 |
+| **`ai_sommer`** | 1.0342 | 1.5159 | 25.4635 |
+| **`sparse_asreml`** | 2.0558 | 2.8142 | 0.0785 |
+| **`nr_sas`** | 1.9885 | 2.8136 | 2.2895 |
 
 ### Analytical Observations from Benchmarking
 
