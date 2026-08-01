@@ -1,18 +1,16 @@
 # ==============================================================================
 # 0. LOAD LIBRARIES
 # ==============================================================================
-# install.packages(c("glmmTMB", "emmeans"))
-library(glmmTMB)
-library(emmeans)
-
-# ==============================================================================
-# 1. THE BULLETPROOF WRAPPER FUNCTION
-# ==============================================================================
 # Required Libraries
 # install.packages(c("glmmTMB", "emmeans", "SpATS"))
 library(glmmTMB)
 library(emmeans)
 library(SpATS)
+
+# ==============================================================================
+# 1. THE BULLETPROOF WRAPPER FUNCTION
+# ==============================================================================
+
 
 #' Fit Agricultural Spatial Models (Including 2D Splines)
 fit_trial_model <- function(data, trait, genotype, rep, row, col, 
@@ -170,6 +168,21 @@ cat("Trial Heritability:", round(my_results$Heritability, 3), "\n\n")
 blups <- my_results$Estimates
 sorted_blups <- blups[order(blups$Predicted_Yield, decreasing = TRUE), ]
 print(sorted_blups)
+
+# 1. Run the Spline_2D model (routes to SpATS)
+my_spatial_results <- fit_trial_model(
+  data = my_field_data, 
+  trait = "harvest_yield",      
+  genotype = "seed_variety",    
+  rep = "block",                
+  row = "plot_row",             
+  col = "plot_col",             
+  estimate_type = "BLUP",       
+  spatial_model = "Spline_2D"  # <-- THIS IS THE KEY CHANGE       
+)
+
+# 2. Now the plot function will work perfectly
+plot(my_spatial_results$Model_Object)
 
 # ==============================================================================
 # 2. THE SIMULATION FUNCTION
@@ -332,3 +345,37 @@ numeric_cols <- c("Genetic_Var", "Error_Var", "Heritability")
 comparison_table[numeric_cols] <- lapply(comparison_table[numeric_cols], round, 2)
 
 print(comparison_table)
+# plot the results 
+plot(wave_spline$Model_Object)
+
+# Extracting Data for ggplot2 (Custom Maps)
+# install.packages("ggplot2")
+library(ggplot2)
+
+# 1. Extract the spatial trend data from the SpATS object
+spatial_data <- obtain.spatialtrend(wave_spline$Model_Object)
+
+# 2. Convert the spatial matrix into a clean dataframe for ggplot
+trend_df <- expand.grid(
+  Row = spatial_data$row.p, 
+  Column = spatial_data$col.p
+)
+# Flatten the matrix into a single vector of effects
+trend_df$Spatial_Effect <- as.vector(spatial_data$fit)
+
+# 3. Build the custom heat map
+ggplot(trend_df, aes(x = Column, y = Row, fill = Spatial_Effect)) +
+  geom_tile() +
+  # A diverging color scale highlights hot (good) and cold (bad) spots
+  scale_fill_gradient2(low = "firebrick", mid = "white", high = "dodgerblue", midpoint = 0) +
+  theme_minimal() +
+  coord_fixed() + # Keeps the field plots strictly square
+  labs(
+    title = "SpATS Estimated Spatial Surface",
+    subtitle = "Blue areas artificially boosted yield; Red areas artificially depressed yield",
+    x = "Field Column", 
+    y = "Field Row",
+    fill = "Yield\nAdjustment"
+  )
+
+
