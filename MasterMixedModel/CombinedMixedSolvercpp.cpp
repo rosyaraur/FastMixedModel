@@ -144,20 +144,29 @@ Rcpp::List run_mcmcglmm(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, cons
 }
 
 // =========================================================================
-// PATH C: blme Essence (Penalized MAP / Profiled Optimization)
+// PATH C: blme Essence (Penalized MAP with Warm-Start & Adaptive Bounds)
 // =========================================================================
 Rcpp::List run_blme(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y, 
                     const Eigen::SparseMatrix<double>& A_inv, double init_varE, double init_varU, int max_iter, double tol) {
     int n = y.size(); int p = X.cols(); int q = Z.cols();
-    double varE = init_varE, varU = init_varU;
-    double df_e0 = 5.0, S_e0 = varE * (df_e0 - 2.0);
-    double df_u0 = 5.0, S_u0 = varU * (df_u0 - 2.0);
+    double df_e0 = 5.0, df_u0 = 5.0;
     
     Eigen::MatrixXd M(n, p + q); M << X, Z;
     Eigen::SparseMatrix<double> M_sp = M.sparseView();
     Eigen::SparseMatrix<double> MtM = M_sp.transpose() * M_sp;
     Eigen::VectorXd Mty = M_sp.transpose() * y;
     
+    // 1. DATA-DRIVEN WARM START (Moment Estimation)
+    Eigen::MatrixXd XtX = X.transpose() * X;
+    Eigen::VectorXd beta_ols = XtX.llt().solve(X.transpose() * y);
+    Eigen::VectorXd res_ols = y - X * beta_ols;
+    double warm_varE = std::max(1e-4, res_ols.squaredNorm() / (n - p));
+    double warm_varU = std::max(1e-4, warm_varE * 0.5);
+    double init_log_lambda = std::log(warm_varE / warm_varU);
+    
+    double S_e0 = warm_varE * (df_e0 - 2.0);
+    double S_u0 = warm_varU * (df_u0 - 2.0);
+
     Eigen::SparseMatrix<double> A_inv_pad(p + q, p + q);
     for (int k = 0; k < A_inv.outerSize(); ++k) {
         for (Eigen::SparseMatrix<double>::InnerIterator it(A_inv, k); it; ++it) A_inv_pad.insert(it.row() + p, it.col() + p) = it.value();
@@ -165,22 +174,28 @@ Rcpp::List run_blme(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
     
     auto penalized_dev = [&](double log_lambda) {
         double lambda = std::exp(log_lambda);
+        if (lambda < 1e-8 || lambda > 1e8) return std::numeric_limits<double>::infinity();
+        
         Eigen::SparseMatrix<double> C = MtM + lambda * A_inv_pad;
         Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver(C);
+        if (solver.info() != Eigen::Success) return std::numeric_limits<double>::infinity();
+        
         Eigen::VectorXd theta_hat = solver.solve(Mty);
         
         double varE_hat = (y - M_sp * theta_hat).squaredNorm() / n;
         Eigen::VectorXd u_hat = theta_hat.tail(q);
         double varU_hat = u_hat.dot(A_inv * u_hat) / q;
-        if (varE_hat <= 0 || varU_hat <= 0) return std::numeric_limits<double>::infinity();
+        if (varE_hat <= 1e-8 || varU_hat <= 1e-8) return std::numeric_limits<double>::infinity();
         
         return n * std::log(varE_hat) + q * std::log(varU_hat) + 
                ((df_e0 / 2.0 + 1.0) * std::log(varE_hat) + (S_e0 / (2.0 * varE_hat))) + 
                ((df_u0 / 2.0 + 1.0) * std::log(varU_hat) + (S_u0 / (2.0 * varU_hat)));
     };
     
-    // Golden Section Search for Brent optimization equivalent
-    double ax = -10.0, cx = 10.0;
+    // 2. ADAPTIVE SEARCH WINDOW CENTERED ON WARM START
+    double ax = init_log_lambda - 6.0; 
+    double cx = init_log_lambda + 6.0;
+    
     const double R = 0.618033989, C = 1.0 - R;
     double x0 = ax, x3 = cx;
     double x1 = x0 + C * (x3 - x0), x2 = x0 + R * (x3 - x0);
@@ -217,6 +232,9 @@ Rcpp::List run_hmc(const Eigen::VectorXd& y, double init_varE, double init_varU,
 // =========================================================================
 // PATH E: lme4 Essence (Profiled REML - CORRECTED)
 // =========================================================================
+// =========================================================================
+// PATH E: lme4 Essence (Profiled REML with Automated Warm-Start & Adaptive Bounds)
+// =========================================================================
 Rcpp::List run_lme4(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y, 
                     const Eigen::SparseMatrix<double>& A_inv, double tol) {
     int n = y.size(); int p = X.cols(); int q = Z.cols();
@@ -224,13 +242,22 @@ Rcpp::List run_lme4(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
     Eigen::SparseMatrix<double> M_sp = M.sparseView();
     Eigen::SparseMatrix<double> MtM = M_sp.transpose() * M_sp;
     Eigen::VectorXd Mty = M_sp.transpose() * y;
-    
+    double yTy = y.squaredNorm();
+
+    // 1. AUTOMATED WARM START (Quick Moment Estimate for Initial Lambda)
+    Eigen::MatrixXd XtX = X.transpose() * X;
+    Eigen::VectorXd beta_ols = XtX.llt().solve(X.transpose() * y);
+    Eigen::VectorXd res_ols = y - X * beta_ols;
+    double init_varE = std::max(1e-4, res_ols.squaredNorm() / (n - p));
+    double init_varU = std::max(1e-4, init_varE * 0.5); // Safe initial genetic variance guess
+    double init_lambda = init_varE / init_varU;
+    double init_log_lambda = std::log(init_lambda);
+
     Eigen::SparseMatrix<double> A_inv_pad(p + q, p + q);
     for (int k = 0; k < A_inv.outerSize(); ++k) {
         for (Eigen::SparseMatrix<double>::InnerIterator it(A_inv, k); it; ++it) A_inv_pad.insert(it.row() + p, it.col() + p) = it.value();
     }
     
-    // Precompute log determinant of A_inv
     double log_det_A_inv = 0.0;
     Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> llt_A(A_inv);
     if (llt_A.info() == Eigen::Success) {
@@ -239,6 +266,8 @@ Rcpp::List run_lme4(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
     
     auto reml_objective = [&](double log_lambda) {
         double lambda = std::exp(log_lambda);
+        if (lambda < 1e-8 || lambda > 1e8) return std::numeric_limits<double>::infinity();
+        
         Eigen::SparseMatrix<double> C = MtM + lambda * A_inv_pad;
         Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver(C);
         if (solver.info() != Eigen::Success) return std::numeric_limits<double>::infinity();
@@ -250,12 +279,14 @@ Rcpp::List run_lme4(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
         double varE_hat = res_sq / (n - p);
         double log_det_C = solver.vectorD().array().log().sum();
         
-        // Exact match to native R REML objective scaling
         double dev = -0.5 * ((n - p) * std::log(varE_hat) + log_det_C - (q * log_lambda + log_det_A_inv) + (n - p));
-        return -dev; // Minimize negative REML
+        return -dev; 
     };
     
-    double ax = -15.0, cx = 15.0;
+    // 2. ADAPTIVE SEARCH WINDOW (Centered dynamically around the warm-start guess)
+    double ax = init_log_lambda - 6.0;
+    double cx = init_log_lambda + 6.0;
+    
     const double R = 0.618033989, C = 1.0 - R;
     double x0 = ax, x3 = cx;
     double x1 = x0 + C * (x3 - x0), x2 = x0 + R * (x3 - x0);
