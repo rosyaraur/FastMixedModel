@@ -8,19 +8,17 @@
 using namespace Rcpp;
 
 // =========================================================================
-// PATH A: BGLR Essence (Kernel Diagonalization Gibbs) - CORRECTED
+// PATH A: BGLR Essence (Kernel Diagonalization Gibbs with Chain Storage)
 // =========================================================================
 Rcpp::List run_bglr(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y, 
                     const Eigen::MatrixXd& K, double init_varE, double init_varU, int n_iter, int burn_in) {
     int n = y.size(); int p = X.cols();
     Eigen::MatrixXd ZKZt = Z * K * Z.transpose();
     
-    // Diagonalize the covariance structure
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(ZKZt);
     Eigen::MatrixXd V = es.eigenvectors();
     Eigen::VectorXd d = es.eigenvalues();
     
-    // Filter non-zero eigenvalues matching native R logic
     std::vector<int> keep_indices;
     for(int i = 0; i < d.size(); ++i) {
         if (d[i] > 1e-8) keep_indices.push_back(i);
@@ -35,18 +33,21 @@ Rcpp::List run_bglr(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
     }
     
     Eigen::MatrixXd W = Z * V_sub;
-    Eigen::VectorXd y_rot = V.transpose() * y; // Full rotation for X
+    Eigen::VectorXd y_rot = V.transpose() * y; 
     Eigen::MatrixXd X_rot = V.transpose() * X;
     
     double varE = init_varE, varU = init_varU;
     Eigen::VectorXd beta = Eigen::VectorXd::Zero(p);
     Eigen::VectorXd u_star = Eigen::VectorXd::Zero(q_star);
     
+    int eff_samples = n_iter - burn_in;
+    Eigen::VectorXd chain_varE(eff_samples);
+    Eigen::VectorXd chain_varU(eff_samples);
+    
     double sum_varE = 0, sum_varU = 0;
     Eigen::VectorXd sum_beta = Eigen::VectorXd::Zero(p);
     Eigen::MatrixXd sum_u = Eigen::MatrixXd::Zero(Z.cols(), 1);
     
-    // Hyperparameters matching native R
     double df_e0 = 5.0; double S_e0 = varE * (df_e0 - 2.0);
     double df_u0 = 5.0; double S_u0 = varU * (df_u0 - 2.0);
     
@@ -54,8 +55,8 @@ Rcpp::List run_bglr(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
     Eigen::VectorXd w2 = W.colwise().squaredNorm();
     Eigen::VectorXd e = y - X * beta - W * u_star;
     
+    int sample_idx = 0;
     for(int iter = 0; iter < n_iter; iter++) {
-        // Sample beta (Fixed effects)
         for(int j = 0; j < p; ++j) {
             e += X.col(j) * beta(j);
             double lhs = x2(j) / varE;
@@ -64,7 +65,6 @@ Rcpp::List run_bglr(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
             e -= X.col(j) * beta(j);
         }
         
-        // Sample u_star (Random effects in spectral space)
         for(int j = 0; j < q_star; ++j) {
             e += W.col(j) * u_star(j);
             double lhs = w2(j) / varE + 1.0 / (d_sub(j) * varU);
@@ -73,7 +73,6 @@ Rcpp::List run_bglr(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
             e -= W.col(j) * u_star(j);
         }
         
-        // Sample Variances (Exact match to native R Inverse-ChiSq logic)
         varE = (e.squaredNorm() + S_e0) / R::rchisq(n + df_e0);
         varU = ((u_star.array().square() / d_sub.array()).sum() + S_u0) / R::rchisq(q_star + df_u0);
         
@@ -82,20 +81,26 @@ Rcpp::List run_bglr(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
             sum_varE += varE; 
             sum_varU += varU;
             sum_u += (V_sub * u_star);
+            
+            chain_varE(sample_idx) = varE;
+            chain_varU(sample_idx) = varU;
+            sample_idx++;
         }
     }
     
-    int eff_samples = n_iter - burn_in;
     return Rcpp::List::create(
         Named("beta") = sum_beta / eff_samples, 
         Named("u") = sum_u / eff_samples,
         Named("varE") = sum_varE / eff_samples, 
-        Named("varU") = sum_varU / eff_samples
+        Named("varU") = sum_varU / eff_samples,
+        Named("chains") = Rcpp::List::create(
+            Named("varE") = chain_varE,
+            Named("varU") = chain_varU
+        )
     );
 }
-
 // =========================================================================
-// PATH B: MCMCglmm Essence (Sparse MME Block Gibbs)
+// PATH B: MCMCglmm Essence (Sparse MME Block Gibbs with Chain Storage)
 // =========================================================================
 Rcpp::List run_mcmcglmm(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y, 
                         const Eigen::SparseMatrix<double>& A_inv, double init_varE, double init_varU, int n_iter, int burn_in) {
@@ -114,9 +119,14 @@ Rcpp::List run_mcmcglmm(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, cons
     double df_e0 = 5.0, S_e0 = varE * (df_e0 - 2.0);
     double df_u0 = 5.0, S_u0 = varU * (df_u0 - 2.0);
     
+    int eff_samples = n_iter - burn_in;
+    Eigen::VectorXd chain_varE(eff_samples);
+    Eigen::VectorXd chain_varU(eff_samples);
+    
     Eigen::VectorXd sum_theta = Eigen::VectorXd::Zero(p + q);
     double sum_varE = 0, sum_varU = 0;
     
+    int sample_idx = 0;
     for(int iter = 0; iter < n_iter; iter++) {
         double lambda = varE / varU;
         Eigen::SparseMatrix<double> C = MtM + lambda * A_inv_pad;
@@ -135,13 +145,28 @@ Rcpp::List run_mcmcglmm(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, cons
         varU = (u.dot(A_inv * u) + S_u0) / R::rchisq(q + df_u0);
         
         if (iter >= burn_in) {
-            sum_theta += theta; sum_varE += varE; sum_varU += varU;
+            sum_theta += theta; 
+            sum_varE += varE; 
+            sum_varU += varU;
+            
+            chain_varE(sample_idx) = varE;
+            chain_varU(sample_idx) = varU;
+            sample_idx++;
         }
     }
-    int eff_samples = n_iter - burn_in;
-    return Rcpp::List::create(Named("beta") = (sum_theta / eff_samples).head(p), Named("u") = (sum_theta / eff_samples).tail(q), 
-                              Named("varE") = sum_varE / eff_samples, Named("varU") = sum_varU / eff_samples);
+    
+    return Rcpp::List::create(
+        Named("beta") = (sum_theta / eff_samples).head(p), 
+        Named("u") = (sum_theta / eff_samples).tail(q), 
+        Named("varE") = sum_varE / eff_samples, 
+        Named("varU") = sum_varU / eff_samples,
+        Named("chains") = Rcpp::List::create(
+            Named("varE") = chain_varE,
+            Named("varU") = chain_varU
+        )
+    );
 }
+
 
 // =========================================================================
 // PATH C: blme Essence (Penalized MAP with Warm-Start & Adaptive Bounds)
