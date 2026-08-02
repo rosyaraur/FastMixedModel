@@ -4,11 +4,33 @@
 #include <limits>
 #include <string>
 #include <vector>
+#include <algorithm> 
 
 using namespace Rcpp;
 
 // =========================================================================
-// PATH A: BGLR Essence (Kernel Diagonalization Gibbs with Chain Storage)
+// HELPER: Inverse-Gaussian Random Number Generator (Michael-Schucany-Haas)
+// =========================================================================
+inline double rinvgauss(double mu, double lambda) {
+    if (mu <= 0.0 || lambda <= 0.0) return 1e-10; // Prevent domain errors
+    
+    double v = R::rnorm(0.0, 1.0);
+    double y = v * v;
+    double mu_sq = mu * mu;
+    
+    double x = mu + (mu_sq * y) / (2.0 * lambda) - 
+               (mu / (2.0 * lambda)) * std::sqrt(4.0 * mu * lambda * y + mu_sq * y * y);
+               
+    double z = R::runif(0.0, 1.0);
+    if (z <= (mu / (mu + x))) {
+        return x;
+    } else {
+        return mu_sq / x;
+    }
+}
+
+// =========================================================================
+// PATH 1: BGLR Essence (Kernel Diagonalization Gibbs with Chain Storage)
 // =========================================================================
 Rcpp::List run_bglr(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y, 
                     const Eigen::MatrixXd& K, double init_varE, double init_varU, int n_iter, int burn_in) {
@@ -99,8 +121,9 @@ Rcpp::List run_bglr(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
         )
     );
 }
+
 // =========================================================================
-// PATH B: MCMCglmm Essence (Sparse MME Block Gibbs with Chain Storage)
+// PATH 2: MCMCglmm Essence (Sparse MME Block Gibbs with Chain Storage)
 // =========================================================================
 Rcpp::List run_mcmcglmm(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y, 
                         const Eigen::SparseMatrix<double>& A_inv, double init_varE, double init_varU, int n_iter, int burn_in) {
@@ -167,9 +190,8 @@ Rcpp::List run_mcmcglmm(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, cons
     );
 }
 
-
 // =========================================================================
-// PATH C: blme Essence (Penalized MAP with Warm-Start & Adaptive Bounds)
+// PATH 3: blme Essence (Penalized MAP with Warm-Start & Adaptive Bounds)
 // =========================================================================
 Rcpp::List run_blme(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y, 
                     const Eigen::SparseMatrix<double>& A_inv, double init_varE, double init_varU, int max_iter, double tol) {
@@ -181,7 +203,6 @@ Rcpp::List run_blme(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
     Eigen::SparseMatrix<double> MtM = M_sp.transpose() * M_sp;
     Eigen::VectorXd Mty = M_sp.transpose() * y;
     
-    // 1. DATA-DRIVEN WARM START (Moment Estimation)
     Eigen::MatrixXd XtX = X.transpose() * X;
     Eigen::VectorXd beta_ols = XtX.llt().solve(X.transpose() * y);
     Eigen::VectorXd res_ols = y - X * beta_ols;
@@ -217,10 +238,8 @@ Rcpp::List run_blme(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
                ((df_u0 / 2.0 + 1.0) * std::log(varU_hat) + (S_u0 / (2.0 * varU_hat)));
     };
     
-    // 2. ADAPTIVE SEARCH WINDOW CENTERED ON WARM START
     double ax = init_log_lambda - 6.0; 
     double cx = init_log_lambda + 6.0;
-    
     const double R = 0.618033989, C = 1.0 - R;
     double x0 = ax, x3 = cx;
     double x1 = x0 + C * (x3 - x0), x2 = x0 + R * (x3 - x0);
@@ -241,7 +260,7 @@ Rcpp::List run_blme(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
 }
 
 // =========================================================================
-// PATH D: brms Essence (Placeholder)
+// PATH 4: brms Essence (Placeholder)
 // =========================================================================
 Rcpp::List run_hmc(const Eigen::VectorXd& y, double init_varE, double init_varU, int n_iter, int burn_in) {
     double varE = init_varE;
@@ -255,10 +274,7 @@ Rcpp::List run_hmc(const Eigen::VectorXd& y, double init_varE, double init_varU,
 }
 
 // =========================================================================
-// PATH E: lme4 Essence (Profiled REML - CORRECTED)
-// =========================================================================
-// =========================================================================
-// PATH E: lme4 Essence (Profiled REML with Automated Warm-Start & Adaptive Bounds)
+// PATH 5: lme4 Essence (Profiled REML with Automated Warm-Start & Bounds)
 // =========================================================================
 Rcpp::List run_lme4(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y, 
                     const Eigen::SparseMatrix<double>& A_inv, double tol) {
@@ -267,14 +283,12 @@ Rcpp::List run_lme4(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
     Eigen::SparseMatrix<double> M_sp = M.sparseView();
     Eigen::SparseMatrix<double> MtM = M_sp.transpose() * M_sp;
     Eigen::VectorXd Mty = M_sp.transpose() * y;
-    double yTy = y.squaredNorm();
-
-    // 1. AUTOMATED WARM START (Quick Moment Estimate for Initial Lambda)
+    
     Eigen::MatrixXd XtX = X.transpose() * X;
     Eigen::VectorXd beta_ols = XtX.llt().solve(X.transpose() * y);
     Eigen::VectorXd res_ols = y - X * beta_ols;
     double init_varE = std::max(1e-4, res_ols.squaredNorm() / (n - p));
-    double init_varU = std::max(1e-4, init_varE * 0.5); // Safe initial genetic variance guess
+    double init_varU = std::max(1e-4, init_varE * 0.5); 
     double init_lambda = init_varE / init_varU;
     double init_log_lambda = std::log(init_lambda);
 
@@ -285,9 +299,7 @@ Rcpp::List run_lme4(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
     
     double log_det_A_inv = 0.0;
     Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> llt_A(A_inv);
-    if (llt_A.info() == Eigen::Success) {
-        log_det_A_inv = llt_A.vectorD().array().log().sum();
-    }
+    if (llt_A.info() == Eigen::Success) log_det_A_inv = llt_A.vectorD().array().log().sum();
     
     auto reml_objective = [&](double log_lambda) {
         double lambda = std::exp(log_lambda);
@@ -304,14 +316,10 @@ Rcpp::List run_lme4(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
         double varE_hat = res_sq / (n - p);
         double log_det_C = solver.vectorD().array().log().sum();
         
-        double dev = -0.5 * ((n - p) * std::log(varE_hat) + log_det_C - (q * log_lambda + log_det_A_inv) + (n - p));
-        return -dev; 
+        return -(-0.5 * ((n - p) * std::log(varE_hat) + log_det_C - (q * log_lambda + log_det_A_inv) + (n - p))); 
     };
     
-    // 2. ADAPTIVE SEARCH WINDOW (Centered dynamically around the warm-start guess)
-    double ax = init_log_lambda - 6.0;
-    double cx = init_log_lambda + 6.0;
-    
+    double ax = init_log_lambda - 6.0; double cx = init_log_lambda + 6.0;
     const double R = 0.618033989, C = 1.0 - R;
     double x0 = ax, x3 = cx;
     double x1 = x0 + C * (x3 - x0), x2 = x0 + R * (x3 - x0);
@@ -332,7 +340,7 @@ Rcpp::List run_lme4(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Ei
 }
 
 // =========================================================================
-// PATH F: mbest Essence (Method of Moments - CORRECTED)
+// PATH 6: mbest Essence (Method of Moments - CORRECTED)
 // =========================================================================
 Rcpp::List run_mbest(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y) {
     int n = y.size(); int p = X.cols(); int q = Z.cols();
@@ -344,7 +352,7 @@ Rcpp::List run_mbest(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const E
     Eigen::MatrixXd ZtZ_inv = (Z.transpose() * Z + Eigen::MatrixXd::Identity(q, q) * 1e-6).ldlt().solve(Eigen::MatrixXd::Identity(q, q));
     Eigen::VectorXd u_naive = ZtZ_inv * Z.transpose() * res_ols;
     
-    double varU_mom = std::max(1e-6, u_naive.squaredNorm() / q - res_ols.squaredNorm() / (n - p)); // Empirical match
+    double varU_mom = std::max(1e-6, u_naive.squaredNorm() / q - res_ols.squaredNorm() / (n - p)); 
     double varE_mom = std::max(1e-6, (res_ols - Z * u_naive).squaredNorm() / n);
     
     Eigen::MatrixXd M(n, p + q); M << X, Z;
@@ -359,7 +367,7 @@ Rcpp::List run_mbest(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const E
 }
 
 // =========================================================================
-// PATH G: rrBLUP Essence (Spectral Decomposition + GSS)
+// PATH 7: rrBLUP Essence (Spectral Decomposition + GSS)
 // =========================================================================
 Rcpp::List run_rrblup(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y,
                       const Eigen::MatrixXd& K, const Eigen::SparseMatrix<double>& A_inv, double tol) {
@@ -426,7 +434,7 @@ Rcpp::List run_rrblup(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const 
 }
 
 // =========================================================================
-// PATH H: sommer Essence (Dense AI-REML)
+// PATH 8: sommer Essence (Dense AI-REML)
 // =========================================================================
 Rcpp::List run_sommer(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y,
                       const Eigen::MatrixXd& K, double init_varE, double init_varU, int max_iter, double tol) {
@@ -454,7 +462,7 @@ Rcpp::List run_sommer(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const 
               0.5 * q_u.dot(P * q_e), 0.5 * q_e.dot(P * q_e);
         
         Eigen::Vector2d delta = AI.ldlt().solve(Eigen::Vector2d(S_u, S_e));
-        double new_varU = std::max(1e-6, varU + (varU * varU) * delta(0) / q); // Scaled step like native R
+        double new_varU = std::max(1e-6, varU + (varU * varU) * delta(0) / q); 
         double new_varE = std::max(1e-6, varE + (varE * varE) * delta(1) / n);
         
         if (std::abs(new_varU - varU) + std::abs(new_varE - varE) < tol) { varU = new_varU; varE = new_varE; break; }
@@ -470,7 +478,7 @@ Rcpp::List run_sommer(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const 
 }
 
 // =========================================================================
-// PATH I: ASReml Essence (Sparse MME Exact AI-REML)
+// PATH 9: ASReml Essence (Sparse MME Exact AI-REML)
 // =========================================================================
 Rcpp::List run_asreml(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y,
                       const Eigen::SparseMatrix<double>& A_inv, double init_varE, double init_varU, int max_iter, double tol) {
@@ -511,7 +519,7 @@ Rcpp::List run_asreml(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const 
 }
 
 // =========================================================================
-// PATH J: SAS PROC MIXED Essence (Exact Newton-Raphson)
+// PATH 10: SAS PROC MIXED Essence (Exact Newton-Raphson)
 // =========================================================================
 Rcpp::List run_sas(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eigen::VectorXd& y,
                    const Eigen::MatrixXd& K, double init_varE, double init_varU, int max_iter, double tol) {
@@ -558,6 +566,168 @@ Rcpp::List run_sas(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, const Eig
 }
 
 // =========================================================================
+// PATH 11: Bayesian Lasso Essence (Scale-Mixture of Normals Gibbs)
+// =========================================================================
+Rcpp::List run_bayes_lasso(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, 
+                           const Eigen::VectorXd& y, double init_varE, 
+                           double lambda_sq, int n_iter, int burn_in) {
+    int n = y.size(); int p = X.cols(); int q = Z.cols();
+    
+    double varE = init_varE;
+    Eigen::VectorXd beta = Eigen::VectorXd::Zero(p);
+    Eigen::VectorXd u = Eigen::VectorXd::Zero(q);
+    Eigen::VectorXd tau_sq = Eigen::VectorXd::Ones(q); 
+    
+    Eigen::VectorXd x2 = X.colwise().squaredNorm();
+    Eigen::VectorXd z2 = Z.colwise().squaredNorm();
+    Eigen::VectorXd e = y - X * beta - Z * u;
+    
+    int eff_samples = n_iter - burn_in;
+    Eigen::VectorXd sum_beta = Eigen::VectorXd::Zero(p);
+    Eigen::VectorXd sum_u = Eigen::VectorXd::Zero(q);
+    double sum_varE = 0;
+    
+    double df_e0 = 5.0; double S_e0 = varE * (df_e0 - 2.0);
+    
+    for (int iter = 0; iter < n_iter; ++iter) {
+        
+        for (int j = 0; j < p; ++j) {
+            e += X.col(j) * beta(j);
+            double lhs = x2(j) / varE;
+            if (lhs > 1e-8) {
+                double rhs = X.col(j).dot(e) / varE;
+                beta(j) = R::rnorm(rhs / lhs, std::sqrt(1.0 / lhs));
+            }
+            e -= X.col(j) * beta(j);
+        }
+        
+        for (int k = 0; k < q; ++k) {
+            e += Z.col(k) * u(k);
+            double lhs = (z2(k) + (1.0 / tau_sq(k))) / varE;
+            double rhs = Z.col(k).dot(e) / varE;
+            
+            u(k) = R::rnorm(rhs / lhs, std::sqrt(1.0 / lhs));
+            e -= Z.col(k) * u(k);
+        }
+        
+        for (int k = 0; k < q; ++k) {
+            double u_sq = std::max(u(k) * u(k), 1e-12); 
+            double mu_prime = std::sqrt((lambda_sq * varE) / u_sq);
+            double inv_tau2 = rinvgauss(mu_prime, lambda_sq);
+            tau_sq(k) = 1.0 / std::max(inv_tau2, 1e-12); 
+        }
+        
+        varE = (e.squaredNorm() + S_e0) / R::rchisq(n + df_e0);
+        
+        if (iter >= burn_in) {
+            sum_beta += beta;
+            sum_u += u;
+            sum_varE += varE;
+        }
+    }
+    
+    return Rcpp::List::create(Named("beta") = sum_beta / eff_samples, Named("u") = sum_u / eff_samples, Named("varE") = sum_varE / eff_samples);
+}
+
+// =========================================================================
+// PATH 12: BayesC-Pi Essence (Spike-and-Slab Selection)
+// =========================================================================
+Rcpp::List run_bayes_cpi(const Eigen::MatrixXd& X, const Eigen::MatrixXd& Z, 
+                         const Eigen::VectorXd& y, double init_varE, double init_varU, 
+                         double pi_prob, int n_iter, int burn_in) {
+    int n = y.size(); int p = X.cols(); int q = Z.cols();
+    
+    double varE = init_varE, varU = init_varU;
+    Eigen::VectorXd beta = Eigen::VectorXd::Zero(p);
+    Eigen::VectorXd u = Eigen::VectorXd::Zero(q);
+    Eigen::VectorXi delta = Eigen::VectorXi::Zero(q); // Indicator variable
+    
+    Eigen::VectorXd x2 = X.colwise().squaredNorm();
+    Eigen::VectorXd z2 = Z.colwise().squaredNorm();
+    Eigen::VectorXd e = y - X * beta - Z * u;
+    
+    int eff_samples = n_iter - burn_in;
+    Eigen::VectorXd sum_beta = Eigen::VectorXd::Zero(p);
+    Eigen::VectorXd sum_u = Eigen::VectorXd::Zero(q);
+    Eigen::VectorXd sum_prob = Eigen::VectorXd::Zero(q); 
+    double sum_varE = 0, sum_varU = 0;
+    
+    double df_e0 = 5.0; double S_e0 = varE * (df_e0 - 2.0);
+    double df_u0 = 5.0; double S_u0 = varU * (df_u0 - 2.0);
+    
+    // Convert inclusion probability to prior log odds
+    double log_prior_odds = std::log(pi_prob / (1.0 - pi_prob));
+    
+    for (int iter = 0; iter < n_iter; ++iter) {
+        
+        // 1. Fixed Effects (Always active)
+        for (int j = 0; j < p; ++j) {
+            e += X.col(j) * beta(j);
+            double lhs = x2(j) / varE;
+            if (lhs > 1e-8) {
+                double rhs = X.col(j).dot(e) / varE;
+                beta(j) = R::rnorm(rhs / lhs, std::sqrt(1.0 / lhs));
+            }
+            e -= X.col(j) * beta(j);
+        }
+        
+        // 2. Penalized Markers (Spike and Slab via Indicator delta)
+        int num_active = 0;
+        double sum_sq_u = 0.0;
+        
+        for (int k = 0; k < q; ++k) {
+            if (delta(k) == 1) { e += Z.col(k) * u(k); }
+            
+            double lhs = z2(k) / varE + 1.0 / varU;
+            double rhs = Z.col(k).dot(e) / varE;
+            double mean = rhs / lhs;
+            double var = 1.0 / lhs;
+            
+            // Bayes Factor (Log Scale) & Inclusion Probability
+            double log_bf = -0.5 * std::log(varU / var) + (mean * mean) / (2.0 * var);
+            double log_odds = log_prior_odds + log_bf;
+            double prob_inc = 1.0 / (1.0 + std::exp(-log_odds));
+            
+            // Prevent NaN if exp overflows
+            if (std::isnan(prob_inc)) prob_inc = (log_odds > 0) ? 1.0 : 0.0;
+            
+            if (R::runif(0.0, 1.0) < prob_inc) {
+                delta(k) = 1;
+                u(k) = R::rnorm(mean, std::sqrt(var));
+                e -= Z.col(k) * u(k);
+                num_active++;
+                sum_sq_u += u(k) * u(k);
+            } else {
+                delta(k) = 0;
+                u(k) = 0.0;
+            }
+        }
+        
+        // 3. Variance Updates
+        varE = (e.squaredNorm() + S_e0) / R::rchisq(n + df_e0);
+        if (num_active > 0) {
+            varU = (sum_sq_u + S_u0) / R::rchisq(num_active + df_u0);
+        }
+        
+        if (iter >= burn_in) {
+            sum_beta += beta;
+            sum_u += u;
+            for(int k = 0; k < q; k++) sum_prob(k) += delta(k);
+            sum_varE += varE;
+            sum_varU += varU;
+        }
+    }
+    
+    return Rcpp::List::create(
+        Named("beta") = sum_beta / eff_samples,
+        Named("u") = sum_u / eff_samples,
+        Named("inclusion_prob") = sum_prob / eff_samples,
+        Named("varE") = sum_varE / eff_samples,
+        Named("varU") = sum_varU / eff_samples
+    );
+}
+
+// =========================================================================
 // MAIN ROUTER: CombinedMixedSolvercpp
 // =========================================================================
 // [[Rcpp::export]]
@@ -573,7 +743,8 @@ Rcpp::List CombinedMixedSolvercpp(
     int max_iter = 50,
     int n_iter = 1000,
     int burn_in = 200,
-    double tol = 1e-6) 
+    double tol = 1e-6,
+    double pi_prob = 0.05) // <--- Added parameter for BayesCpi
 {
     RNGScope scope; 
 
@@ -607,7 +778,173 @@ Rcpp::List CombinedMixedSolvercpp(
     else if (engine == "nr_sas") {
         return run_sas(X, Z, y, K, init_varE, init_varU, max_iter, tol);
     } 
+    else if (engine == "gibbs_bayes_lasso") {
+        return run_bayes_lasso(X, Z, y, init_varE, init_varU, n_iter, burn_in); 
+    }
+    else if (engine == "gibbs_bayes_cpi") {
+        return run_bayes_cpi(X, Z, y, init_varE, init_varU, pi_prob, n_iter, burn_in);
+    }
     else {
         Rcpp::stop("Engine not recognized.");
     }
+}
+
+
+// =========================================================================
+// 1. Principal Component Analysis (Safe Version)
+// =========================================================================
+// [[Rcpp::export]]
+Eigen::MatrixXd reduce_pca(const Eigen::MatrixXd& Z, int k) {
+    // 1. Column-center the matrix
+    Eigen::MatrixXd centered = Z.rowwise() - Z.colwise().mean();
+    
+    // 2. Safety Check: k cannot exceed the rank of the matrix
+    int max_k = std::min(centered.rows(), centered.cols());
+    if (k > max_k) {
+        Rcpp::warning("Requested k is greater than matrix rank. Truncating to maximum possible.");
+        k = max_k; 
+    }
+    
+    // 3. Perform SVD 
+    // (Note: BDCSVD is fast, but if your Mac STILL crashes, 
+    // change BDCSVD to JacobiSVD for maximum stability on Apple Silicon)
+    Eigen::BDCSVD<Eigen::MatrixXd> svd(centered, Eigen::ComputeThinU | Eigen::ComputeThinV);
+    
+    // 4. THE FIX: Explicitly evaluate the matrix into a concrete object
+    // Do NOT return the expression (svd.matrixU... * svd.singular...) directly.
+    Eigen::MatrixXd Z_reduced = svd.matrixU().leftCols(k) * svd.singularValues().head(k).asDiagonal();
+    
+    // 5. Safely pass the realized matrix back to R
+    return Z_reduced;
+}
+
+// =========================================================================
+// 2. Partial Least Squares (PLS - NIPALS Algorithm)
+// =========================================================================
+// Supervised reduction maximizing covariance between features Z and phenotype y.
+// [[Rcpp::export]]
+Eigen::MatrixXd reduce_pls(const Eigen::MatrixXd& Z, const Eigen::VectorXd& y, int k) {
+    int n = Z.rows();
+    
+    Eigen::MatrixXd T(n, k);   // Latent score matrix
+    Eigen::MatrixXd E = Z;     // Deflated feature matrix
+    Eigen::VectorXd f = y;     // Deflated response vector
+    
+    for (int i = 0; i < k; ++i) {
+        // Step 1: Calculate weights proportional to covariance
+        Eigen::VectorXd w = E.transpose() * f;
+        w.normalize();
+        
+        // Step 2: Calculate latent scores
+        Eigen::VectorXd t = E * w;
+        
+        // Step 3: Calculate loadings
+        Eigen::VectorXd p = (E.transpose() * t) / t.squaredNorm();
+        
+        // Step 4: Deflate matrices
+        E -= t * p.transpose();
+        
+        // Prevent division by zero if vectors become perfectly orthogonal
+        double t_norm_sq = t.squaredNorm();
+        if (t_norm_sq > 1e-12) {
+            double q_scalar = (f.transpose() * t)(0) / t_norm_sq;
+            f -= t * q_scalar;
+        }
+        
+        T.col(i) = t;
+    }
+    
+    return T;
+}
+
+// =========================================================================
+// 3. Random Projections (Johnson-Lindenstrauss Transform)
+// =========================================================================
+// Ultra-fast, data-agnostic reduction preserving pairwise distances.
+// [[Rcpp::export]]
+Eigen::MatrixXd reduce_random_projection(const Eigen::MatrixXd& Z, int k) {
+    int q = Z.cols();
+    Eigen::MatrixXd R(q, k);
+    
+    // Generate a Gaussian random matrix
+    for (int i = 0; i < q; ++i) {
+        for (int j = 0; j < k; ++j) {
+            R(i, j) = R::rnorm(0.0, 1.0);
+        }
+    }
+    
+    // Project and scale
+    return (Z * R) / std::sqrt(static_cast<double>(k));
+}
+
+
+
+// =========================================================================
+// KERNEL 1: Linear Environmental Kernel (Analogous to GBLUP)
+// =========================================================================
+// [[Rcpp::export]]
+Eigen::MatrixXd build_linear_kernel(const Eigen::MatrixXd& W) {
+    int n = W.rows();
+    int q = W.cols();
+    Eigen::MatrixXd W_scaled(n, q);
+    
+    // Standardize each column (mean = 0, variance = 1)
+    for(int j = 0; j < q; ++j) {
+        double mean = W.col(j).mean();
+        Eigen::VectorXd centered = W.col(j).array() - mean;
+        double var = centered.squaredNorm() / (n - 1.0);
+        double sd = std::sqrt(var);
+        
+        if(sd > 1e-8) {
+            W_scaled.col(j) = centered / sd;
+        } else {
+            W_scaled.col(j) = centered; // Prevent division by zero for constants
+        }
+    }
+    
+    // Compute cross-product and scale by number of variables
+    return (W_scaled * W_scaled.transpose()) / static_cast<double>(q);
+}
+
+// =========================================================================
+// KERNEL 2: Non-Linear Gaussian Kernel (RKHS)
+// =========================================================================
+// [[Rcpp::export]]
+Eigen::MatrixXd build_gaussian_kernel(const Eigen::MatrixXd& W, double h) {
+    int n = W.rows();
+    int q = W.cols();
+    Eigen::MatrixXd W_scaled(n, q);
+    
+    // Standardize each column
+    for(int j = 0; j < q; ++j) {
+        double mean = W.col(j).mean();
+        Eigen::VectorXd centered = W.col(j).array() - mean;
+        double var = centered.squaredNorm() / (n - 1.0);
+        double sd = std::sqrt(var);
+        
+        if(sd > 1e-8) W_scaled.col(j) = centered / sd;
+        else W_scaled.col(j) = centered;
+    }
+    
+    Eigen::MatrixXd K(n, n);
+    for(int i = 0; i < n; ++i) {
+        for(int j = i; j < n; ++j) {
+            double dist_sq = (W_scaled.row(i) - W_scaled.row(j)).squaredNorm();
+            double val = std::exp(-dist_sq / h);
+            K(i, j) = val;
+            K(j, i) = val; // Matrix is symmetric
+        }
+    }
+    
+    // Add small ridge to diagonal for numerical stability during inversion
+    K += Eigen::MatrixXd::Identity(n, n) * 1e-6;
+    return K;
+}
+
+// =========================================================================
+// KERNEL 3: Interaction Matrix (Hadamard Product for GxE)
+// =========================================================================
+// [[Rcpp::export]]
+Eigen::MatrixXd build_interaction_kernel(const Eigen::MatrixXd& K1, const Eigen::MatrixXd& K2) {
+    return K1.cwiseProduct(K2);
 }
