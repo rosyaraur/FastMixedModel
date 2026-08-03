@@ -935,3 +935,185 @@ print(summary_df)
 cat(sprintf("\nTrue Parameters -> varE: %.2f | varU: %.2f | Beta_0: %.2f | Beta_1: %.2f\n",
             true_varE, true_varU, true_beta[1], true_beta[2]))
 
+library(Rcpp)
+library(Matrix)
+
+# Assuming you have already sourced your C++ backend
+# sourceCpp("CombinedMixedSolvercpp_3.cpp")
+
+# =====================================================================
+# 1. Simulate Dummy Data
+# =====================================================================
+set.seed(42)
+N <- 1000       # Number of individuals/environments (Large N)
+q_env <- 100    # Raw environmental variables
+k_dim <- 50     # Target reduced dimensions (k << N)
+
+# Phenotype and fixed effects (intercept)
+y <- rnorm(N, mean = 50, sd = 10)
+X <- matrix(1, N, 1)
+
+# Raw environmental feature matrix
+W_env <- matrix(rnorm(N * q_env, mean = 20, sd = 5), N, q_env)
+
+# =====================================================================
+# 2. Build the RKHS (Gaussian) Kernel via C++
+# =====================================================================
+cat("1. Building Non-Linear Kernel...\n")
+# Bandwidth heuristic: median of squared Euclidean distances
+dist_matrix <- as.matrix(dist(scale(W_env)))^2
+h_heuristic <- median(dist_matrix[upper.tri(dist_matrix)])
+
+# Creates an N x N dense kernel
+K <- build_gaussian_kernel(W_env, h = h_heuristic) 
+
+# =====================================================================
+# 3. Double-Center the Kernel Matrix
+# =====================================================================
+cat("2. Double-Centering the Kernel...\n")
+# Mathematical formula: K_c = H %*% K %*% H
+# Where H is the centering matrix: H = I - (1/N) * J
+H <- diag(N) - matrix(1/N, nrow = N, ncol = N)
+K_centered <- H %*% K %*% H
+
+# =====================================================================
+# 4. Extract Non-Linear Features (Kernel PCA) via C++
+# =====================================================================
+cat(sprintf("3. Extracting top %d non-linear features...\n", k_dim))
+# We pass the N x N double-centered kernel into your C++ PCA engine.
+# This returns Z_reduced (an N x k matrix) representing the primary 
+# axes of variance in the non-linear RKHS space.
+Z_reduced <- reduce_pca(K_centered, k = k_dim)
+
+# =====================================================================
+# 5. Fit the Reduced-Rank Mixed Model
+# =====================================================================
+cat("4. Fitting Reduced-Rank Model via lme4 engine...\n")
+# Since Z_reduced contains orthogonal SVD components, the covariance 
+# between these new latent features is effectively the Identity matrix.
+A_inv_identity <- as(diag(1, k_dim), "dgCMatrix")
+
+# Notice how fast this runs! We bypassed the O(N^3) inversion of the N x N 
+# Kernel and replaced it with a k x k identity inversion.
+fit_rr <- CombinedMixedSolvercpp(
+  engine = "reml_lme4",
+  X = X,
+  Z = Z_reduced,       # Injecting the reduced Kernel features here
+  y = y,
+  K = diag(1, k_dim),  # Placeholder (not actively used by lme4 path)
+  A_inv = A_inv_identity,
+  tol = 1e-6
+)
+
+# =====================================================================
+# 6. View Results
+# =====================================================================
+cat("\n--- Reduced-Rank Model Results ---\n")
+cat(sprintf("Latent Non-Linear Variance (varU): %.4f\n", fit_rr$varU))
+cat(sprintf("Residual Variance (varE): %.4f\n", fit_rr$varE))
+
+# The 'u' estimates are the effects of the non-linear latent manifolds
+# rather than specific linear markers.
+cat("\nTop 5 Latent Manifold Effects (u):\n")
+print(head(fit_rr$u, 5))
+
+# Heterosis 
+library(Matrix)
+# Rcpp::sourceCpp("CombinedMixedSolvercpp.cpp") # Load your C++ backend[cite: 1]
+
+# =====================================================================
+# 1. Simulate Parent Marker Data (0, 1, 2 Genotype Matrix)
+# =====================================================================
+set.seed(42)
+n_females <- 30
+n_males <- 25
+n_markers <- 200
+
+# Simulated SNP matrices for maternal (females) and paternal (males) lines
+W_f <- matrix(sample(0:2, n_females * n_markers, replace = TRUE), nrow = n_females, ncol = n_markers)
+W_m <- matrix(sample(0:2, n_males * n_markers, replace = TRUE), nrow = n_males, ncol = n_markers)
+
+# =====================================================================
+# 2. Build Kernels via C++ Backend Functions
+# =====================================================================
+# A. Additive GCA Kernels using build_linear_kernel[cite: 1]
+K_Af <- build_linear_kernel(W_f)
+K_Am <- build_linear_kernel(W_m)
+
+# B. Non-Additive / Epistatic Kernels using build_gaussian_kernel (RKHS)[cite: 1]
+h_val <- median(as.matrix(dist(W_f))^2)
+K_RKHS_f <- build_gaussian_kernel(W_f, h = h_val)
+K_RKHS_m <- build_gaussian_kernel(W_m, h = h_val)
+
+# =====================================================================
+# 3. Construct Hybrid Crosses and Incidence Matrices
+# =====================================================================
+n_crosses <- 150
+female_idx <- sample(1:n_females, n_crosses, replace = TRUE)
+male_idx <- sample(1:n_males, n_crosses, replace = TRUE)
+
+# Incidence matrices mapping hybrid observations to parent GCA effects
+Z_f <- Matrix::sparseMatrix(i = 1:n_crosses, j = female_idx, x = 1, dims = c(n_crosses, n_females))
+Z_m <- Matrix::sparseMatrix(i = 1:n_crosses, j = male_idx, x = 1, dims = c(n_crosses, n_males))
+
+# Specific Combining Ability (SCA) Incidence Matrix for unique pairs
+cross_pairs <- paste0(female_idx, "_", male_idx)
+unique_pairs <- unique(cross_pairs)
+n_sca <- length(unique_pairs)
+sca_factor <- match(cross_pairs, unique_pairs)
+
+Z_s <- Matrix::sparseMatrix(i = 1:n_crosses, j = sca_factor, x = 1, dims = c(n_crosses, n_sca))
+
+# C. SCA Kernel via Hadamard (element-wise) Product[cite: 1]
+# Using build_interaction_kernel to model non-additive cross interactions
+K_SCA <- build_interaction_kernel(K_Af[female_idx, female_idx], K_Am[male_idx, male_idx])
+K_SCA <- K_SCA + diag(1e-4, n_crosses) # Ridge stabilization
+
+# =====================================================================
+# 4. Assemble Combined Joint System for the C++ Solver[cite: 1]
+# =====================================================================
+# Concatenate incidence matrices: Z_joint = [Z_f | Z_m | Z_s]
+Z_joint <- cbind(as.matrix(Z_f), as.matrix(Z_m), as.matrix(Z_s))
+
+# Construct block-diagonal hyper-kernel K combining GCA and SCA spaces
+total_random_effects <- n_females + n_males + n_sca
+K_joint <- Matrix::bdiag(K_Af, K_Am, K_SCA)
+
+# Fixed effects matrix (e.g., Intercept / Environmental blocks) and Phenotypes (y)
+X <- matrix(1, nrow = n_crosses, ncol = 1)
+y <- 15.0 + rnorm(n_crosses, mean = 0, sd = 2.5)
+
+# Sparse identity placeholder matrix for internal engine padding[cite: 1]
+A_inv_identity <- as(diag(1, total_random_effects), "dgCMatrix")
+
+# =====================================================================
+# 5. Execute Solver Engine (`ai_sommer`)[cite: 1]
+# =====================================================================
+cat("Executing C++ Hybrid Mixed Model Solver...\n")
+
+fit <- CombinedMixedSolvercpp(
+  engine = "ai_sommer",
+  X = X,
+  Z = Z_joint,
+  y = y,
+  K = as.matrix(K_joint),
+  A_inv = A_inv_identity,
+  init_varE = 1.0,
+  init_varU = 1.0,
+  max_iter = 50,
+  tol = 1e-5
+)
+
+# =====================================================================
+# 6. Parse Solutions
+# =====================================================================
+u_solutions <- fit$u
+gca_female_effects <- u_solutions[1:n_females]
+gca_male_effects <- u_solutions[(n_females + 1):(n_females + n_males)]
+sca_cross_effects <- u_solutions[(n_females + n_males + 1):total_random_effects]
+
+cat("\n--- HYBRID MODEL RESULTS ---\n")
+cat(sprintf("Residual Variance (varE): %.4f\n", fit$varE))
+cat(sprintf("Genetic Variance (varU):  %.4f\n", fit$varU))
+cat(sprintf("Solved GCA for %d female parents and %d male parents.\n", length(gca_female_effects), length(gca_male_effects)))
+cat(sprintf("Solved SCA deviations for %d unique hybrid cross combinations.\n", length(sca_cross_effects)))
