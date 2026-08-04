@@ -948,3 +948,65 @@ Eigen::MatrixXd build_gaussian_kernel(const Eigen::MatrixXd& W, double h) {
 Eigen::MatrixXd build_interaction_kernel(const Eigen::MatrixXd& K1, const Eigen::MatrixXd& K2) {
     return K1.cwiseProduct(K2);
 }
+
+// =========================================================================
+// BLUPF90 Essence: Sparse Henderson's MME Solver (Direct Sparse LDLT)
+// =========================================================================
+// [[Rcpp::depends(RcppEigen)]]
+#include <RcppEigen.h>
+
+using namespace Rcpp;
+
+// [[Rcpp::export]]
+Rcpp::List run_blupf90_solver(
+    const Eigen::MatrixXd& X, 
+    const Eigen::MatrixXd& Z, 
+    const Eigen::VectorXd& y, 
+    const Eigen::SparseMatrix<double>& A_inv, 
+    double varE, 
+    double varU) 
+{
+    int n = y.size(); 
+    int p = X.cols(); 
+    int q = Z.cols();
+    
+    // 1. Compute variance ratio lambda = varE / varU
+    double lambda = varE / varU;
+    
+    // 2. Build combined design matrix M = [X | Z] and sparse cross-products
+    Eigen::MatrixXd M(n, p + q); 
+    M << X, Z;
+    Eigen::SparseMatrix<double> M_sp = M.sparseView();
+    Eigen::SparseMatrix<double> MtM = M_sp.transpose() * M_sp;
+    Eigen::VectorXd Mty = M_sp.transpose() * y;
+    
+    // 3. Pad sparse A_inv matrix to match dimensions (p + q) x (p + q)
+    Eigen::SparseMatrix<double> A_inv_pad(p + q, p + q);
+    for (int k = 0; k < A_inv.outerSize(); ++k) {
+        for (Eigen::SparseMatrix<double>::InnerIterator it(A_inv, k); it; ++it) {
+            A_inv_pad.insert(it.row() + p, it.col() + p) = it.value();
+        }
+    }
+    
+    // 4. Assemble Left-Hand Side (LHS) Coefficient Matrix C = MtM + lambda * A_inv_pad
+    Eigen::SparseMatrix<double> C = MtM + lambda * A_inv_pad;
+    
+    // 5. Solve using Eigen's Sparse SimplicialLDLT (Direct Sparse Solver philosophy)
+    Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver(C);
+    if (solver.info() != Eigen::Success) {
+        stop("BLUPF90 MME solver failed: Matrix is not positive definite or sparse factorization failed.");
+    }
+    
+    Eigen::VectorXd theta = solver.solve(Mty);
+    
+    // 6. Extract fixed effects (beta) and random breeding values (u)
+    Eigen::VectorXd beta_hat = theta.head(p);
+    Eigen::VectorXd u_hat = theta.tail(q);
+    
+    return Rcpp::List::create(
+        Named("beta") = beta_hat,
+        Named("u") = u_hat,
+        Named("varE") = varE,
+        Named("varU") = varU
+    );
+}
