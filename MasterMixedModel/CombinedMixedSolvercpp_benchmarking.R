@@ -313,6 +313,9 @@ p_heatmap <- ggplot(melted_cor, aes(x = Engine1, y = Engine2, fill = Correlation
 # Display the plot
 print(p_heatmap)
 
+
+
+
 # Animal model 
 library(Rcpp)
 library(RcppEigen)
@@ -1117,3 +1120,199 @@ cat(sprintf("Residual Variance (varE): %.4f\n", fit$varE))
 cat(sprintf("Genetic Variance (varU):  %.4f\n", fit$varU))
 cat(sprintf("Solved GCA for %d female parents and %d male parents.\n", length(gca_female_effects), length(gca_male_effects)))
 cat(sprintf("Solved SCA deviations for %d unique hybrid cross combinations.\n", length(sca_cross_effects)))
+
+# The R script below simulates an animal model dataset, constructs a sparse inverse relationship matrix ($A^{-1}$),
+# and executes the BLUPF90 solver routine to obtain joint solutions in milliseconds:
+library(Rcpp)
+library(RcppEigen)
+library(Matrix)
+library(MASS)
+
+# 1. Compile or source the updated C++ backend
+# Rcpp::sourceCpp("CombinedMixedSolvercpp.cpp")
+
+# =========================================================================
+# TEST CASE: BLUPF90 Approach (Sparse MME Direct Solver)
+# =========================================================================
+set.seed(2026)
+
+n_animals <- 2500
+p <- 2            # Fixed effects (Intercept + Sex covariate)
+q <- n_animals    # Random animal genetic levels (1-to-1 mapping via Z = Identity)
+
+# True parameters
+true_beta <- c(10.5, 2.1)
+true_varU <- 3.0  # Additive genetic variance
+true_varE <- 1.2  # Residual variance
+
+# Fixed effects matrix (X) and random incidence matrix (Z)
+X <- cbind(1, sample(c(0, 1), n_animals, replace = TRUE))
+Z <- diag(n_animals)
+
+# Simulate a sparse pedigree-based relationship matrix A and its inverse A_inv
+# (Using a generated kinship matrix as a proxy for pedigree relationship A)
+raw_pedigree_markers <- matrix(rnorm(n_animals * 200), nrow = n_animals, ncol = 200)
+A_matrix <- tcrossprod(raw_pedigree_markers) / 200
+diag(A_matrix) <- diag(A_matrix) + 0.1 # Ensure positive definiteness
+
+# Compute sparse inverse relationship matrix (A_inv) - Core BLUPF90 input format
+A_inv_dense <- base::solve(A_matrix)
+A_inv_sparse <- methods::as(Matrix::Matrix(A_inv_dense, sparse = TRUE), "dgCMatrix")
+
+# Simulate true breeding values (u) and phenotypes (y)
+u_true <- mvrnorm(1, mu = rep(0, q), Sigma = A_matrix * true_varU)
+e_true <- rnorm(n_animals, mean = 0, sd = sqrt(true_varE))
+y_resp <- as.vector(X %*% true_beta + Z %*% u_true + e_true)
+
+# 2. Execute the BLUPF90 Sparse MME Routine
+cat("Executing BLUPF90 Sparse MME Solver Routine...\n")
+start_time <- Sys.time()
+
+fit_blupf90 <- run_blupf90_solver(
+  X = X, 
+  Z = Z, 
+  y = y_resp, 
+  A_inv = A_inv_sparse, 
+  varE = true_varE,  # Assumed known or pre-estimated via REML
+  varU = true_varU
+)
+
+exec_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+
+# 3. Output Results
+cat(sprintf("\n--- BLUPF90 Solver Completed in %.4f seconds ---\n", exec_time))
+cat("Estimated Fixed Effects (beta):\n")
+print(fit_blupf90$beta)
+
+cat("\nFirst 5 Estimated Breeding Values (BLUP u):\n")
+print(head(fit_blupf90$u, 5))
+
+# Verify correlation with true breeding values
+ebv_correlation <- cor(u_true, fit_blupf90$u)
+cat(sprintf("\nCorrelation between True u and BLUP u: %.4f\n", ebv_correlation))
+
+library(Rcpp)
+library(RcppEigen)
+library(Matrix)
+library(MASS)
+library(ggplot2)
+
+# 1. Ensure the C++ backend (including `run_blupf90_solver`) is compiled
+# setwd("~/Documents/githubdir/FastMixedModel/MasterMixedModel")
+# Rcpp::sourceCpp("CombinedMixedSolvercpp.cpp")
+
+# 2. Simulate Animal Model Benchmark Dataset
+set.seed(2026)
+
+n_animals <- 3000  # Scale up observations to test sparse performance
+p <- 2             # Fixed effects (Intercept + Sex covariate)
+q <- n_animals     # Random animal genetic levels (1-to-1 mapping via Z = Identity)
+
+true_beta <- c(15.0, 2.8)
+true_varU <- 3.2   # True additive genetic variance
+true_varE <- 1.5   # True residual variance
+
+# Design matrices
+X <- cbind(1, sample(c(0, 1), n_animals, replace = TRUE))
+colnames(X) <- c("Intercept", "Sex")
+Z <- diag(n_animals)
+
+# Generate relationship matrix A and its sparse inverse A_inv
+raw_markers <- matrix(rnorm(n_animals * 300), nrow = n_animals, ncol = 300)
+A_matrix <- tcrossprod(raw_markers) / 300
+diag(A_matrix) <- diag(A_matrix) + 0.1 
+
+A_inv_dense <- base::solve(A_matrix)
+A_inv_sparse <- methods::as(Matrix::Matrix(A_inv_dense, sparse = TRUE), "dgCMatrix")
+K_matrix <- A_matrix
+
+# Simulate true breeding values (u) and phenotypes (y)
+u_true <- mvrnorm(1, mu = rep(0, q), Sigma = A_matrix * true_varU)
+e_true <- rnorm(n_animals, mean = 0, sd = sqrt(true_varE))
+y_resp <- as.vector(X %*% true_beta + Z %*% u_true + e_true)
+
+# 3. Define Engines to Benchmark
+# (Including BLUPF90 direct solver alongside iterative REML/spectral engines)
+engines_to_test <- c("blupf90_direct", "reml_lme4", "sparse_asreml", "spectral_rrblup", "ai_sommer")
+
+benchmark_results <- data.frame(
+  Engine = character(),
+  Method_Type = character(),
+  Time_Seconds = numeric(),
+  EBV_Correlation = numeric(),
+  stringsAsFactors = FALSE
+)
+
+cat("=========================================================================\n")
+cat("                  STARTING MIXED MODEL SOLVER BENCHMARK                  \n")
+cat("=========================================================================\n")
+
+for (eng in engines_to_test) {
+  cat(sprintf("Running %s... ", eng))
+  start_time <- Sys.time()
+  
+  if (eng == "blupf90_direct") {
+    # BLUPF90 Direct Sparse Solver (Supplying true or pre-estimated variances)
+    fit <- run_blupf90_solver(
+      X = X, Z = Z, y = y_resp, 
+      A_inv = A_inv_sparse, 
+      varE = true_varE, 
+      varU = true_varU
+    )
+    est_u <- fit$u
+    method_type <- "Direct Sparse MME"
+    
+  } else {
+    # Iterative Likelihood / Spectral Engines via wrapper
+    fit <- Fit_Mixed_Model(
+      engine = eng, X = X, Z = Z, y = y_resp, 
+      K = K_matrix, A_inv = A_inv_sparse,
+      init_varE = 1.0, init_varU = 1.0,
+      max_iter = 50, tol = 1e-6
+    )
+    est_u <- if (!is.null(fit$u)) fit$u else fit$post_u
+    method_type <- "Iterative / Optimization"
+  }
+  
+  end_time <- Sys.time()
+  exec_time <- as.numeric(difftime(end_time, start_time, units = "secs"))
+  
+  # Compute correlation of estimated breeding values against true simulated u
+  ebv_cor <- cor(u_true, as.vector(est_u))
+  
+  benchmark_results <- rbind(benchmark_results, data.frame(
+    Engine = eng,
+    Method_Type = method_type,
+    Time_Seconds = round(exec_time, 4),
+    EBV_Correlation = round(ebv_cor, 4)
+  ))
+  
+  cat("Done.\n")
+}
+
+# 4. Print Summary Table
+cat("\n=========================================================================\n")
+cat("                         BENCHMARK SUMMARY RESULTS                       \n")
+cat("=========================================================================\n")
+print(benchmark_results)
+
+# 5. Plot Comparison (Execution Time vs. Solvers)
+p_bench <- ggplot(benchmark_results, aes(x = reorder(Engine, Time_Seconds), y = Time_Seconds, fill = Method_Type)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  coord_flip() +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Computational Benchmark: BLUPF90 vs. Iterative Solvers",
+    subtitle = paste0("Dataset Size: N = ", n_animals, " animals | q = ", q, " random effects"),
+    x = "Solver Engine",
+    y = "Execution Time (Seconds)",
+    fill = "Optimization Type"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, size = 9),
+    legend.position = "bottom"
+  ) +
+  geom_text(aes(label = sprintf("%.4fs", Time_Seconds)), hjust = -0.1, size = 3.5)
+
+print(p_bench)
