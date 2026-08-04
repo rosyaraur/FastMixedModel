@@ -1297,6 +1297,27 @@ cat("=========================================================================\n
 print(benchmark_results)
 
 # 5. Plot Comparison (Execution Time vs. Solvers)
+p_bench <- ggplot(benchmark_results, aes(x = reorder(Engine, EBV_Correlation), y = EBV_Correlation, fill = Method_Type)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  coord_flip() +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Computational Benchmark: BLUPF90 vs. Iterative Solvers",
+    subtitle = paste0("Dataset Size: N = ", n_animals, " animals | q = ", q, " random effects"),
+    x = "Solver Engine",
+    y = "EBV correlation",
+    fill = "Optimization Type"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, size = 9),
+    legend.position = "bottom"
+  ) +
+  geom_text(aes(label = round(EBV_Correlation,2), hjust = -0.1, size = 3.5))
+
+print(p_bench)
+
+# 5. Plot Comparison (Execution Time vs. Solvers)
 p_bench <- ggplot(benchmark_results, aes(x = reorder(Engine, Time_Seconds), y = Time_Seconds, fill = Method_Type)) +
   geom_bar(stat = "identity", width = 0.6) +
   coord_flip() +
@@ -1316,3 +1337,208 @@ p_bench <- ggplot(benchmark_results, aes(x = reorder(Engine, Time_Seconds), y = 
   geom_text(aes(label = sprintf("%.4fs", Time_Seconds)), hjust = -0.1, size = 3.5)
 
 print(p_bench)
+
+
+#' Asreml Engine with Method of Moments (MoM) Warm-Start
+Fit_Asreml_WarmStart <- function(X, Z, y, K = NULL, A_inv = NULL) {
+  
+  cat("-> Computing instant Method of Moments (MoM) initializers...\n")
+  t_mom <- Sys.time()
+  
+  # 1. Run moment_mbest for instant analytical variance estimates
+  mom_fit <- CombinedMixedSolvercpp(
+    engine = "moment_mbest", 
+    X = X, Z = Z, y = y, 
+    K = if(is.null(K)) diag(ncol(Z)) else K, 
+    A_inv = A_inv
+  )
+  
+  mom_time <- as.numeric(difftime(Sys.time(), t_mom, units = "secs"))
+  cat(sprintf("   MoM seed obtained in %.4f seconds (varE: %.4f, varU: %.4f)\n", 
+              mom_time, mom_fit$varE, mom_fit$varU))
+  
+  # 2. Pass MoM variances as warm-start initializers into sparse_asreml
+  cat("-> Launching sparse_asreml with MoM warm-start seeds...\n")
+  fit_warm <- Fit_Mixed_Model(
+    engine = "sparse_asreml", 
+    X = X, Z = Z, y = y, 
+    K = K, A_inv = A_inv,
+    init_varE = mom_fit$varE, 
+    init_varU = mom_fit$varU,
+    max_iter = 50, 
+    tol = 1e-6
+  )
+  
+  return(fit_warm)
+}
+
+##############################################
+# R Wrapper Implementation for MoM Warm-Starting
+#' Asreml Engine with Method of Moments (MoM) Warm-Start
+Fit_Asreml_WarmStart <- function(X, Z, y, K = NULL, A_inv = NULL) {
+  
+  cat("-> Computing instant Method of Moments (MoM) initializers...\n")
+  t_mom <- Sys.time()
+  
+  # 1. Run moment_mbest for instant analytical variance estimates
+  mom_fit <- CombinedMixedSolvercpp(
+    engine = "moment_mbest", 
+    X = X, Z = Z, y = y, 
+    K = if(is.null(K)) diag(ncol(Z)) else K, 
+    A_inv = A_inv
+  )
+  
+  mom_time <- as.numeric(difftime(Sys.time(), t_mom, units = "secs"))
+  cat(sprintf("   MoM seed obtained in %.4f seconds (varE: %.4f, varU: %.4f)\n", 
+              mom_time, mom_fit$varE, mom_fit$varU))
+  
+  # 2. Pass MoM variances as warm-start initializers into sparse_asreml
+  cat("-> Launching sparse_asreml with MoM warm-start seeds...\n")
+  fit_warm <- Fit_Mixed_Model(
+    engine = "sparse_asreml", 
+    X = X, Z = Z, y = y, 
+    K = K, A_inv = A_inv,
+    init_varE = mom_fit$varE, 
+    init_varU = mom_fit$varU,
+    max_iter = 50, 
+    tol = 1e-6
+  )
+  
+  return(fit_warm)
+}
+
+# Comprehensive Benchmarking Script: Cold vs. Warm sparse_asreml vs. blupf90_directThe R script below sets up 
+# a comparative benchmark across $N = 3,000$ animals, testing standard cold-start sparse_asreml, warm-started sparse_asreml, 
+# and the single-pass blupf90_direct solver.
+library(Rcpp)
+library(RcppEigen)
+library(Matrix)
+library(MASS)
+library(ggplot2)
+
+# 1. Source C++ backend
+# Rcpp::sourceCpp("CombinedMixedSolvercpp.cpp")
+
+# =========================================================================
+# BENCHMARK SETUP (N = 3,000 Animals)
+# =========================================================================
+set.seed(2026)
+
+n_animals <- 3000
+p <- 2
+q <- n_animals
+
+true_beta <- c(15.0, 2.8)
+true_varU <- 3.2
+true_varE <- 1.5
+
+X <- cbind(1, sample(c(0, 1), n_animals, replace = TRUE))
+colnames(X) <- c("Intercept", "Sex")
+Z <- diag(n_animals)
+
+# Simulate relationship matrix and sparse inverse
+raw_markers <- matrix(rnorm(n_animals * 300), nrow = n_animals, ncol = 300)
+A_matrix <- tcrossprod(raw_markers) / 300
+diag(A_matrix) <- diag(A_matrix) + 0.1 
+
+A_inv_dense <- base::solve(A_matrix)
+A_inv_sparse <- methods::as(Matrix::Matrix(A_inv_dense, sparse = TRUE), "dgCMatrix")
+K_matrix <- A_matrix
+
+u_true <- mvrnorm(1, mu = rep(0, q), Sigma = A_matrix * true_varU)
+e_true <- rnorm(n_animals, mean = 0, sd = sqrt(true_varE))
+y_resp <- as.vector(X %*% true_beta + Z %*% u_true + e_true)
+
+# =========================================================================
+# EXECUTE BENCHMARK COMPARISON
+# =========================================================================
+engines_to_compare <- c("sparse_asreml_cold", "sparse_asreml_warm", "blupf90_direct", "reml_lme4")
+
+comparison_results <- data.frame(
+  Engine = character(),
+  Optimization_Strategy = character(),
+  Time_Seconds = numeric(),
+  stringsAsFactors = FALSE
+)
+
+cat("\n=========================================================================\n")
+cat("          RUNNING SPEED BENCHMARK: COLD vs WARM ASREML & BLUPF90          \n")
+cat("=========================================================================\n")
+
+for (eng in engines_to_compare) {
+  cat(sprintf("Testing %s... ", eng))
+  start_time <- Sys.time()
+  
+  if (eng == "sparse_asreml_cold") {
+    # Standard Cold Start (Default init 1.0, 1.0)
+    fit <- Fit_Mixed_Model(
+      engine = "sparse_asreml", X = X, Z = Z, y = y_resp, 
+      K = K_matrix, A_inv = A_inv_sparse,
+      init_varE = 1.0, init_varU = 1.0, max_iter = 50, tol = 1e-6
+    )
+    strat <- "Iterative AI-REML (Cold Start)"
+    
+  } else if (eng == "sparse_asreml_warm") {
+    # Optimized Warm Start via Method of Moments
+    fit <- Fit_Asreml_WarmStart(
+      X = X, Z = Z, y = y_resp, K = K_matrix, A_inv = A_inv_sparse
+    )
+    strat <- "Iterative AI-REML (MoM Warm-Start)"
+    
+  } else if (eng == "blupf90_direct") {
+    # Direct Sparse MME Solver (Assumes known/estimated variances)
+    fit <- run_blupf90_solver(
+      X = X, Z = Z, y = y_resp, A_inv = A_inv_sparse, 
+      varE = true_varE, varU = true_varU
+    )
+    strat <- "Single-Pass Direct MME"
+    
+  } else if (eng == "reml_lme4") {
+    fit <- Fit_Mixed_Model(
+      engine = "reml_lme4", X = X, Z = Z, y = y_resp, 
+      K = K_matrix, A_inv = A_inv_sparse, tol = 1e-6
+    )
+    strat <- "Profiled REML (GSS)"
+  }
+  
+  end_time <- Sys.time()
+  exec_time <- as.numeric(difftime(end_time, start_time, units = "secs"))
+  
+  comparison_results <- rbind(comparison_results, data.frame(
+    Engine = eng,
+    Optimization_Strategy = strat,
+    Time_Seconds = round(exec_time, 4)
+  ))
+  
+  cat(sprintf("Done in %.4f seconds.\n", exec_time))
+}
+
+# =========================================================================
+# SUMMARY & VISUALIZATION
+# =========================================================================
+cat("\n=========================================================================\n")
+cat("                       BENCHMARK PERFORMANCE TABLE                       \n")
+cat("=========================================================================\n")
+print(comparison_results)
+
+# Generate Bar Plot
+p_opt <- ggplot(comparison_results, aes(x = reorder(Engine, Time_Seconds), y = Time_Seconds, fill = Optimization_Strategy)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  coord_flip() +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Impact of Algorithmic Warm-Starting on sparse_asreml",
+    subtitle = paste0("Dataset Scale: N = ", n_animals, " animals"),
+    x = "Configuration",
+    y = "Total Execution Time (Seconds)",
+    fill = "Strategy Type"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, size = 9),
+    legend.position = "bottom"
+  ) +
+  geom_text(aes(label = sprintf("%.2fs", Time_Seconds)), hjust = -0.1, size = 3.5)
+
+print(p_opt)
+
